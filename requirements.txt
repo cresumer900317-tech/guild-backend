@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+supabase
+python-dotenv
+apscheduler
+httpx
+postgrest
+gotrue
+realtime
+requests
+beautifulsoup4
