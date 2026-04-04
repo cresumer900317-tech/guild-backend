@@ -1,3 +1,11 @@
+from pathlib import Path
+
+RAW_DIR = Path(__file__).resolve().parent / "raw"
+RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+LATEST_SNAPSHOT_PATH = RAW_DIR / "latest_snapshot.json"
+PREVIOUS_SNAPSHOT_PATH = RAW_DIR / "previous_snapshot.json"
+
 REQUEST_TIMEOUT = 20
 REQUEST_DELAY_SECONDS = 0.8
 DETAIL_REQUEST_DELAY_SECONDS = 0.35
