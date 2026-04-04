@@ -1,8 +1,16 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
+from scheduler import start_scheduler
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = start_scheduler()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,3 +53,33 @@ def get_notices():
         .order("created_at", desc=True)\
         .execute()
     return result.data
+
+@app.get("/api/home-summary")
+def get_home_summary():
+    result = supabase.table("members").select("*").execute()
+    members = result.data
+    if not members:
+        return {
+            "guild_name": "친구패밀리",
+            "guild_count": 5,
+            "member_count": 0,
+            "avg_power": 0,
+            "avg_server_rank": 0
+        }
+    guilds = set(m["guild"] for m in members)
+    avg_power = int(sum(m["power"] or 0 for m in members) / len(members))
+    active = [m["server_rank"] for m in members if m.get("server_rank")]
+    avg_rank = round(sum(active) / len(active), 1) if active else 0
+    return {
+        "guild_name": "친구패밀리",
+        "guild_count": len(guilds),
+        "member_count": len(members),
+        "avg_power": avg_power,
+        "avg_server_rank": avg_rank
+    }
+
+@app.post("/api/crawl")
+def manual_crawl():
+    from scheduler import run_crawl
+    run_crawl()
+    return {"status": "ok", "message": "크롤링 완료"}
