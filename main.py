@@ -11,6 +11,7 @@ def to_camel(members):
         result.append({
             "capturedAt": m.get("captured_at"),
             "guild": m.get("guild"),
+            "guildLevel": m.get("guild_level", 0),
             "name": m.get("name"),
             "job": m.get("job"),
             "level": m.get("level"),

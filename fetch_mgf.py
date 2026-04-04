@@ -65,6 +65,28 @@ def parse_number(text: str) -> int:
     cleaned = re.sub(r"[^0-9]", "", str(text))
     return int(cleaned) if cleaned else 0
 
+def parse_guild_level(html: str) -> int:
+    """길드 페이지 HTML에서 길드 레벨 파싱"""
+    soup = BeautifulSoup(html, "html.parser")
+    page_text = soup.get_text("\n", strip=True)
+
+    # "레벨" 키워드 다음 줄에서 Lv.XX 파싱
+    lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        if line == "레벨" and idx + 1 < len(lines):
+            m = re.search(r"Lv\.?\s*(\d+)", lines[idx + 1])
+            if m:
+                return int(m.group(1))
+
+    # 직접 패턴 매칭
+    m = re.search(r"레벨\s*Lv\.?\s*(\d+)", page_text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"Lv\.(\d+)", page_text)
+    if m:
+        return int(m.group(1))
+    return 0
+
 def parse_detail_page(detail_url: str) -> dict:
     default = {"overall_rank": 0, "server_rank": 0, "popularity": 0}
     if not detail_url:
@@ -106,7 +128,7 @@ def parse_detail_page(detail_url: str) -> dict:
     except Exception:
         return default
 
-def parse_members_from_html(html: str, guild_name: str):
+def parse_members_from_html(html: str, guild_name: str, guild_level: int = 0):
     soup = BeautifulSoup(html, "html.parser")
     members = []
     rows = soup.select(".members-list .member-row")
@@ -139,6 +161,7 @@ def parse_members_from_html(html: str, guild_name: str):
         members.append({
             "capturedAt": datetime.now().isoformat(timespec="seconds"),
             "guild": guild_name,
+            "guild_level": guild_level,
             "guildRank": guild_rank,
             "name": name,
             "job": job or "미확인",
@@ -162,7 +185,9 @@ def fetch_mgf_data():
         print(f"수집 중: {guild_name}")
         html = fetch_page(url, retries=1)
         save_debug_html(guild_name, html)
-        members = parse_members_from_html(html, guild_name)
+        guild_level = parse_guild_level(html)
+        print(f" -> 길드 레벨: {guild_level}")
+        members = parse_members_from_html(html, guild_name, guild_level)
         print(f" -> {len(members)}명")
         all_members.extend(members)
         time.sleep(REQUEST_DELAY_SECONDS)
