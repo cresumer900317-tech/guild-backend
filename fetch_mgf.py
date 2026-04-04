@@ -68,23 +68,15 @@ def parse_number(text: str) -> int:
 def parse_guild_level(html: str) -> int:
     """길드 페이지 HTML에서 길드 레벨 파싱"""
     soup = BeautifulSoup(html, "html.parser")
-    page_text = soup.get_text("\n", strip=True)
 
-    # "레벨" 키워드 다음 줄에서 Lv.XX 파싱
-    lines = [line.strip() for line in page_text.splitlines() if line.strip()]
-    for idx, line in enumerate(lines):
-        if line == "레벨" and idx + 1 < len(lines):
-            m = re.search(r"Lv\.?\s*(\d+)", lines[idx + 1])
+    # stat-pill-label이 "레벨"인 pill의 value 찾기
+    for pill in soup.select(".stat-pill"):
+        label = pill.select_one(".stat-pill-label")
+        value = pill.select_one(".stat-pill-value")
+        if label and value and "레벨" in label.get_text():
+            m = re.search(r"(\d+)", value.get_text())
             if m:
                 return int(m.group(1))
-
-    # 직접 패턴 매칭
-    m = re.search(r"레벨\s*Lv\.?\s*(\d+)", page_text)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"Lv\.(\d+)", page_text)
-    if m:
-        return int(m.group(1))
     return 0
 
 def parse_detail_page(detail_url: str) -> dict:
