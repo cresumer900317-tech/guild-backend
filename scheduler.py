@@ -8,6 +8,23 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def rerank_by_guild(members):
+    """길드별로 전투력 순 재정렬 후 guildRank 1부터 재부여"""
+    from collections import defaultdict
+    guild_groups = defaultdict(list)
+    for m in members:
+        guild_groups[m.get("guild", "")].append(m)
+
+    result = []
+    for guild, group in guild_groups.items():
+        sorted_group = sorted(group, key=lambda x: x.get("power", 0) or 0, reverse=True)
+        for idx, member in enumerate(sorted_group, start=1):
+            member["guild_rank"] = idx
+            result.append(member)
+    return result
+
+
 def to_snake(members):
     result = []
     for m in members:
@@ -33,19 +50,29 @@ def to_snake(members):
         })
     return result
 
+
 def run_crawl():
     logger.info("=== 크롤링 시작 ===")
     try:
         raw_data = fetch_mgf_data()
         transformed = transform_data(raw_data)
-        members = to_snake(transformed["members"])
+        members_camel = transformed["members"]
 
+        # 길드별 순위 재정렬
+        members_camel = rerank_by_guild(members_camel)
+
+        # snake_case 변환
+        members = to_snake(members_camel)
+
+        # 기존 데이터 삭제 후 새로 저장
         supabase.table("members").delete().neq("id", 0).execute()
         if members:
             supabase.table("members").insert(members).execute()
+
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
     except Exception as e:
         logger.error(f"크롤링 오류: {e}")
+
 
 def start_scheduler():
     scheduler = BackgroundScheduler()
