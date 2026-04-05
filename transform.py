@@ -54,6 +54,7 @@ def transform_data(raw_data):
             "image": item.get("image", ""),
             "weeklyDiff": item.get("growth_abs", 0),
             "growthRate": item.get("growth_rate", 0.0),
+            "guildLevel": item.get("guild_level", 0),
             "level": item.get("level", 0),
             "overallRank": item.get("overall_rank", 0),
             "serverRank": item.get("server_rank", 0),
