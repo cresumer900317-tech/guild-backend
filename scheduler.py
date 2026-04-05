@@ -1,8 +1,10 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 from database import supabase
 from fetch_mgf import fetch_mgf_data
 from transform import transform_data
+from datetime import datetime
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -52,16 +54,53 @@ def to_snake(members):
     return result
 
 
+def save_monthly_snapshot(members: list[dict]):
+    """
+    매달 1일 자정에 현재 멤버 데이터를 monthly_snapshots 테이블에 저장.
+    snapshot_month = "YYYY-MM" (이번 달)
+    이미 해당 월 스냅샷이 있으면 저장하지 않음 (월 1회만).
+    """
+    now = datetime.now()
+    snapshot_month = now.strftime("%Y-%m")
+
+    # 이미 이번 달 스냅샷이 있는지 확인
+    existing = supabase.table("monthly_snapshots")\
+        .select("id")\
+        .eq("snapshot_month", snapshot_month)\
+        .limit(1)\
+        .execute()
+
+    if existing.data:
+        logger.info(f"[월간 스냅샷] {snapshot_month} 이미 존재 → 저장 건너뜀")
+        return
+
+    rows = []
+    for m in members:
+        rows.append({
+            "snapshot_month": snapshot_month,
+            "captured_at": now.isoformat(),
+            "name": m.get("name"),
+            "guild": m.get("guild"),
+            "power": m.get("power"),
+            "power_text": m.get("power_text"),
+            "server_rank": m.get("server_rank"),
+            "overall_rank": m.get("overall_rank"),
+        })
+
+    if rows:
+        supabase.table("monthly_snapshots").upsert(
+            rows,
+            on_conflict="snapshot_month,name"
+        ).execute()
+        logger.info(f"[월간 스냅샷] {snapshot_month} 저장 완료: {len(rows)}명")
+
+
 def run_crawl():
     logger.info("=== 크롤링 시작 ===")
     try:
-        from fetch_mgf import save_snapshot
         raw_data = fetch_mgf_data()
         transformed = transform_data(raw_data)
         members_camel = transformed["members"]
-
-        # 스냅샷 저장 (다음 크롤링 때 성장량 비교용)
-        save_snapshot(raw_data)
 
         # 길드별 순위 재정렬
         members_camel = rerank_by_guild(members_camel)
@@ -75,13 +114,33 @@ def run_crawl():
             supabase.table("members").insert(members).execute()
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
+        return members
+
     except Exception as e:
         logger.error(f"크롤링 오류: {e}")
+        return []
+
+
+def run_crawl_and_snapshot():
+    """크롤링 후 월간 스냅샷 저장 (매달 1일 자정 실행)"""
+    logger.info("=== [월초] 크롤링 + 월간 스냅샷 저장 시작 ===")
+    members = run_crawl()
+    if members:
+        save_monthly_snapshot(members)
 
 
 def start_scheduler():
     scheduler = BackgroundScheduler()
+
+    # 1시간마다 일반 크롤링
     scheduler.add_job(run_crawl, IntervalTrigger(hours=1))
+
+    # 매달 1일 00:05에 크롤링 + 월간 스냅샷 저장
+    scheduler.add_job(
+        run_crawl_and_snapshot,
+        CronTrigger(day=1, hour=0, minute=5)
+    )
+
     scheduler.start()
-    logger.info("스케줄러 시작 (1시간마다 실행)")
+    logger.info("스케줄러 시작 (1시간마다 크롤링, 매달 1일 00:05 스냅샷)")
     return scheduler
