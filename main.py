@@ -112,6 +112,14 @@ def get_monthly():
         monthly_diff = cur_power - snap_power if snap else None
         growth_rate = round((monthly_diff / snap_power) * 100, 2) if snap and snap_power > 0 else None
 
+        # 월간 서버 순위 변동 (월초 순위 - 현재 순위, 낮을수록 좋으니 반대로)
+        snap_server_rank = snap.get("server_rank") if snap else None
+        cur_server_rank = cur.get("server_rank")
+        if snap_server_rank and cur_server_rank:
+            monthly_server_diff = snap_server_rank - cur_server_rank  # 양수 = 순위 상승
+        else:
+            monthly_server_diff = None
+
         result.append({
             "capturedAt": cur.get("captured_at"),
             "guild": cur.get("guild"),
@@ -130,6 +138,7 @@ def get_monthly():
             "monthlyDiff": monthly_diff,        # 월간 성장량 (숫자, snap 없으면 null)
             "growthRate": growth_rate,          # 월간 성장률 (%, snap 없으면 null)
             "snapshotMonth": snapshot_month,    # "2025-04"
+            "monthlyServerDiff": monthly_server_diff,  # 월간 서버 순위 변동
             "hasSnapshot": snap is not None,    # 스냅샷 존재 여부
             "isMaster": cur.get("is_master", False),
             "detailUrl": cur.get("detail_url"),
