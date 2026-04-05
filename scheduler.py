@@ -55,9 +55,13 @@ def to_snake(members):
 def run_crawl():
     logger.info("=== 크롤링 시작 ===")
     try:
+        from fetch_mgf import save_snapshot
         raw_data = fetch_mgf_data()
         transformed = transform_data(raw_data)
         members_camel = transformed["members"]
+
+        # 스냅샷 저장 (다음 크롤링 때 성장량 비교용)
+        save_snapshot(raw_data)
 
         # 길드별 순위 재정렬
         members_camel = rerank_by_guild(members_camel)
