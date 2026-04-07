@@ -209,10 +209,10 @@ RIVAL_GUILDS = {
 }
 
 def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
-    """경쟁 길드 페이지 HTML에서 길드 요약 + 멤버 전체 파싱 (텍스트 라인 기반)"""
+    """경쟁 길드 페이지 HTML에서 길드 요약 + 멤버 전체 파싱 (tr + power-tooltip 기반)"""
     soup = BeautifulSoup(html, "html.parser")
-    raw_text = soup.get_text("\n", strip=False)
-    lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+    text = soup.get_text("\n", strip=True)
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
     now = datetime.now().isoformat(timespec="seconds")
 
     # 서버/전체 순위
@@ -226,59 +226,45 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
 
     guild_level = parse_guild_level(html)
 
-    # 멤버 파싱: 순위번호 → 이름 → 직업| → Lv.N → 전투력
+    # 멤버 파싱: tr 안에 a[href*=character.php] + .power-tooltip
     members = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if re.match(r"^\d+$", line):
-            rank = int(line)
-            if rank < 1 or rank > 100:
-                i += 1
-                continue
-            if i + 1 >= len(lines):
-                break
-            name = lines[i + 1]
-            # 이름 검증: 숫자만이거나 너무 짧으면 스킵
-            if re.match(r"^\d+$", name) or len(name) < 1:
-                i += 1
-                continue
-            job = ""
-            level = 0
-            power_text = ""
-            j = i + 2
-            next_rank = rank + 1
-            while j < len(lines):
-                if re.match(r"^\d+$", lines[j]) and int(lines[j]) == next_rank:
-                    break
-                l = lines[j]
-                if "|" in l and "Lv" not in l and len(l) < 30:
-                    job = l.replace("|", "").strip()
-                elif l.startswith("Lv."):
-                    m = re.search(r"(\d+)", l)
-                    if m:
-                        level = int(m.group(1))
-                elif re.search(r"[조억만경]", l) and len(l) > 3:
-                    # 더 긴 전투력 텍스트 선택 (상세한 값)
-                    if len(l) > len(power_text):
-                        power_text = l
-                j += 1
-
-            pw = convert_korean_power_to_int(power_text) if power_text else 0
-            if pw > 0 and name:
-                members.append({
-                    "captured_at": now,
-                    "guild_name": guild_name,
-                    "name": name,
-                    "job": job,
-                    "level": level,
-                    "power": pw,
-                    "power_text": power_text,
-                    "guild_rank": rank,
-                })
-            i = j
+    for tr in soup.select("tr"):
+        name_el = tr.select_one("a[href*='character.php']")
+        power_el = tr.select_one(".power-tooltip")
+        if not (name_el and power_el):
             continue
-        i += 1
+        name = name_el.get_text(strip=True)
+        if not name:
+            continue
+        pw = convert_korean_power_to_int(power_el.get_text(strip=True))
+        if pw <= 0:
+            continue
+        # 직업 (img src에서)
+        job = ""
+        img = tr.select_one("img[src*='companion_jobs']")
+        if img:
+            m = re.search(r"companion_jobs/(.+)\.png", img.get("src", ""))
+            if m:
+                job = m.group(1)
+        # 레벨
+        level = 0
+        lm = re.search(r"Lv\.?(\d+)", tr.get_text())
+        if lm:
+            level = int(lm.group(1))
+        # 전투력 텍스트 (짧은 표시용)
+        td_texts = [td.get_text(strip=True) for td in tr.select("td")]
+        power_text = power_el.get_text(strip=True)
+
+        members.append({
+            "captured_at": now,
+            "guild_name": guild_name,
+            "name": name,
+            "job": job,
+            "level": level,
+            "power": pw,
+            "power_text": power_text,
+            "guild_rank": len(members) + 1,
+        })
 
     # 길드 요약 계산
     total_power = sum(m["power"] for m in members)
