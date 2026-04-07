@@ -121,6 +121,19 @@ def run_crawl():
         return []
 
 
+def run_rival_crawl():
+    """경쟁 길드 데이터 수집 및 저장"""
+    logger.info("=== [경쟁 길드] 크롤링 시작 ===")
+    try:
+        from fetch_mgf import fetch_rival_guilds
+        rivals = fetch_rival_guilds()
+        if rivals:
+            supabase.table("rival_guilds").insert(rivals).execute()
+            logger.info(f"[경쟁 길드] {len(rivals)}개 저장 완료")
+    except Exception as e:
+        logger.error(f"경쟁 길드 크롤링 오류: {e}")
+
+
 def run_crawl_and_snapshot():
     """크롤링 후 월간 스냅샷 저장 (매달 1일 자정 실행)"""
     logger.info("=== [월초] 크롤링 + 월간 스냅샷 저장 시작 ===")
@@ -134,6 +147,9 @@ def start_scheduler():
 
     # 1시간마다 일반 크롤링
     scheduler.add_job(run_crawl, IntervalTrigger(hours=1))
+
+    # 1시간마다 경쟁 길드 크롤링
+    scheduler.add_job(run_rival_crawl, IntervalTrigger(hours=1))
 
     # 매달 1일 00:05에 크롤링 + 월간 스냅샷 저장
     scheduler.add_job(

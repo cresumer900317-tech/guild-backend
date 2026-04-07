@@ -201,3 +201,114 @@ def save_snapshot(latest_rows: list[dict]):
         PREVIOUS_SNAPSHOT_PATH.write_text(json.dumps(latest, ensure_ascii=False, indent=2), encoding="utf-8")
     snapshot = {"capturedAt": datetime.now().isoformat(timespec="seconds"), "rows": latest_rows}
     LATEST_SNAPSHOT_PATH.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+
+# ── 경쟁 길드 크롤링 ────────────────────────────────────────
+RIVAL_GUILDS = {
+    "싸이월드": "https://mgf.gg/contents/guild_info.php?g_name=%EC%8B%B8%EC%9D%B4%EC%9B%94%EB%93%9C",
+    "리안":     "https://mgf.gg/contents/guild_info.php?g_name=%EB%A6%AC%EC%95%88",
+}
+
+def parse_rival_guild(html: str, guild_name: str) -> dict:
+    """경쟁 길드 페이지 HTML에서 핵심 데이터 파싱"""
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text("\n", strip=True)
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    # 총 전투력 (페이지 상단 굵은 숫자)
+    total_power = 0
+    power_el = soup.select_one(".guild-total-power") or soup.select_one(".power-tooltip")
+    if power_el:
+        total_power = convert_korean_power_to_int(power_el.get_text(strip=True))
+
+    # 텍스트 파싱으로 보완
+    if not total_power:
+        for i, line in enumerate(lines):
+            if "전투력" in line and i + 1 < len(lines):
+                candidate = convert_korean_power_to_int(lines[i + 1])
+                if candidate > 0:
+                    total_power = candidate
+                    break
+
+    # 길드원 수
+    member_count = 0
+    m = re.search(r"(\d+)명", text)
+    if m:
+        member_count = int(m.group(1))
+
+    # 서버 순위, 전체 순위
+    server_rank = 0
+    overall_rank = 0
+    for i, line in enumerate(lines):
+        if "서버 순위" in line and i + 1 < len(lines):
+            server_rank = parse_number(lines[i + 1])
+        if "전체 순위" in line and i + 1 < len(lines):
+            overall_rank = parse_number(lines[i + 1])
+
+    # 길드 레벨
+    guild_level = parse_guild_level(html)
+
+    # 멤버 행에서 TOP1 파싱
+    top1_name = ""
+    top1_power = 0
+    top1_job = ""
+
+    rows = soup.select("table tr") or soup.select(".member-row")
+    # guild_info 페이지는 tr 기반
+    trs = soup.select("tr")
+    for tr in trs:
+        tds = tr.select("td")
+        if len(tds) >= 2:
+            name_el = tr.select_one("a")
+            power_el = tr.select_one(".power-tooltip") or (tds[-1] if tds else None)
+            if name_el and power_el:
+                pw = convert_korean_power_to_int(power_el.get_text(strip=True))
+                if pw > top1_power:
+                    top1_power = pw
+                    top1_name = name_el.get_text(strip=True)
+                    # job
+                    img = tr.select_one("img")
+                    if img:
+                        src = img.get("src", "")
+                        job_match = re.search(r"companion_jobs/(.+)\.png", src)
+                        if job_match:
+                            top1_job = job_match.group(1)
+
+    # 총 전투력을 멤버 전투력 합산으로 계산 (더 정확)
+    member_powers = []
+    for tr in trs:
+        power_el = tr.select_one(".power-tooltip")
+        if power_el:
+            pw = convert_korean_power_to_int(power_el.get_text(strip=True))
+            if pw > 0:
+                member_powers.append(pw)
+    if member_powers:
+        total_power = sum(member_powers)
+        member_count = len(member_powers)
+
+    return {
+        "guild_name": guild_name,
+        "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "total_power": total_power,
+        "member_count": member_count,
+        "server_rank": server_rank,
+        "overall_rank": overall_rank,
+        "guild_level": guild_level,
+        "top1_name": top1_name,
+        "top1_power": top1_power,
+        "top1_job": top1_job,
+    }
+
+def fetch_rival_guilds() -> list[dict]:
+    """경쟁 길드 데이터 수집"""
+    results = []
+    for guild_name, url in RIVAL_GUILDS.items():
+        print(f"[경쟁 길드] 수집 중: {guild_name}")
+        try:
+            html = fetch_page(url, retries=2)
+            data = parse_rival_guild(html, guild_name)
+            results.append(data)
+            print(f"  -> 전투력: {data['total_power']}, 인원: {data['member_count']}명")
+        except Exception as e:
+            print(f"  -> 오류: {e}")
+        time.sleep(REQUEST_DELAY_SECONDS)
+    return results

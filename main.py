@@ -214,3 +214,52 @@ def manual_snapshot():
     from scheduler import run_crawl_and_snapshot
     run_crawl_and_snapshot()
     return {"status": "ok", "message": "월간 스냅샷 저장 완료"}
+
+
+@app.get("/api/rivals")
+def get_rivals():
+    """
+    경쟁 길드 최신 데이터 + 친구패밀리 합산 데이터 반환
+    각 길드별 가장 최근 레코드만 반환
+    """
+    # 경쟁 길드 최신 데이터
+    rival_names = ["싸이월드", "리안"]
+    rivals = []
+    for name in rival_names:
+        result = supabase.table("rival_guilds")            .select("*")            .eq("guild_name", name)            .order("captured_at", desc=True)            .limit(1)            .execute()
+        if result.data:
+            rivals.append(result.data[0])
+
+    # 친구패밀리 현재 데이터 계산
+    members_result = supabase.table("members").select("*").execute()
+    members = members_result.data or []
+
+    total_power = sum(m.get("power") or 0 for m in members)
+    member_count = len(members)
+    sorted_members = sorted(members, key=lambda m: m.get("power") or 0, reverse=True)
+    top1 = sorted_members[0] if sorted_members else None
+
+    friends_family = {
+        "guild_name": "친구패밀리",
+        "captured_at": datetime.now().isoformat(),
+        "total_power": total_power,
+        "member_count": member_count,
+        "server_rank": 2,  # 친구들 기준
+        "top1_name": top1["name"] if top1 else "",
+        "top1_power": top1["power"] if top1 else 0,
+        "top1_job": top1["job"] if top1 else "",
+    }
+
+    all_guilds = [friends_family] + rivals
+    # 총 전투력 기준 정렬
+    all_guilds.sort(key=lambda x: x.get("total_power") or 0, reverse=True)
+
+    return all_guilds
+
+
+@app.post("/api/rivals/crawl")
+def manual_rival_crawl():
+    """경쟁 길드 수동 크롤링 (테스트용)"""
+    from scheduler import run_rival_crawl
+    run_rival_crawl()
+    return {"status": "ok", "message": "경쟁 길드 크롤링 완료"}
