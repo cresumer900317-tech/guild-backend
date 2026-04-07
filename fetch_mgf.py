@@ -208,34 +208,14 @@ RIVAL_GUILDS = {
     "리안":     "https://mgf.gg/contents/guild_info.php?g_name=%EB%A6%AC%EC%95%88",
 }
 
-def parse_rival_guild(html: str, guild_name: str) -> dict:
-    """경쟁 길드 페이지 HTML에서 핵심 데이터 파싱"""
+def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
+    """경쟁 길드 페이지 HTML에서 길드 요약 + 멤버 전체 파싱"""
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text("\n", strip=True)
     lines = [l.strip() for l in text.splitlines() if l.strip()]
+    now = datetime.now().isoformat(timespec="seconds")
 
-    # 총 전투력 (페이지 상단 굵은 숫자)
-    total_power = 0
-    power_el = soup.select_one(".guild-total-power") or soup.select_one(".power-tooltip")
-    if power_el:
-        total_power = convert_korean_power_to_int(power_el.get_text(strip=True))
-
-    # 텍스트 파싱으로 보완
-    if not total_power:
-        for i, line in enumerate(lines):
-            if "전투력" in line and i + 1 < len(lines):
-                candidate = convert_korean_power_to_int(lines[i + 1])
-                if candidate > 0:
-                    total_power = candidate
-                    break
-
-    # 길드원 수
-    member_count = 0
-    m = re.search(r"(\d+)명", text)
-    if m:
-        member_count = int(m.group(1))
-
-    # 서버 순위, 전체 순위
+    # 서버/전체 순위
     server_rank = 0
     overall_rank = 0
     for i, line in enumerate(lines):
@@ -244,71 +224,82 @@ def parse_rival_guild(html: str, guild_name: str) -> dict:
         if "전체 순위" in line and i + 1 < len(lines):
             overall_rank = parse_number(lines[i + 1])
 
-    # 길드 레벨
     guild_level = parse_guild_level(html)
 
-    # 멤버 행에서 TOP1 파싱
-    top1_name = ""
-    top1_power = 0
-    top1_job = ""
-
-    rows = soup.select("table tr") or soup.select(".member-row")
-    # guild_info 페이지는 tr 기반
+    # 멤버 파싱 (tr 행 기반)
+    members = []
     trs = soup.select("tr")
-    for tr in trs:
-        tds = tr.select("td")
-        if len(tds) >= 2:
-            name_el = tr.select_one("a")
-            power_el = tr.select_one(".power-tooltip") or (tds[-1] if tds else None)
-            if name_el and power_el:
-                pw = convert_korean_power_to_int(power_el.get_text(strip=True))
-                if pw > top1_power:
-                    top1_power = pw
-                    top1_name = name_el.get_text(strip=True)
-                    # job
-                    img = tr.select_one("img")
-                    if img:
-                        src = img.get("src", "")
-                        job_match = re.search(r"companion_jobs/(.+)\.png", src)
-                        if job_match:
-                            top1_job = job_match.group(1)
-
-    # 총 전투력을 멤버 전투력 합산으로 계산 (더 정확)
-    member_powers = []
+    rank = 0
     for tr in trs:
         power_el = tr.select_one(".power-tooltip")
-        if power_el:
-            pw = convert_korean_power_to_int(power_el.get_text(strip=True))
-            if pw > 0:
-                member_powers.append(pw)
-    if member_powers:
-        total_power = sum(member_powers)
-        member_count = len(member_powers)
+        name_el = tr.select_one("a[href*='character.php']")
+        if not (power_el and name_el):
+            continue
+        pw = convert_korean_power_to_int(power_el.get_text(strip=True))
+        if pw <= 0:
+            continue
+        rank += 1
+        name = name_el.get_text(strip=True)
+        # 직업
+        job = ""
+        img = tr.select_one("img[src*='companion_jobs']")
+        if img:
+            src = img.get("src", "")
+            job_m = re.search(r"companion_jobs/(.+)\.png", src)
+            if job_m:
+                job = job_m.group(1)
+        # 레벨
+        level = 0
+        level_m = re.search(r"Lv\.\s*(\d+)", tr.get_text())
+        if level_m:
+            level = int(level_m.group(1))
 
-    return {
+        members.append({
+            "captured_at": now,
+            "guild_name": guild_name,
+            "name": name,
+            "job": job,
+            "level": level,
+            "power": pw,
+            "power_text": power_el.get_text(strip=True),
+            "guild_rank": rank,
+        })
+
+    # 길드 요약 계산
+    total_power = sum(m["power"] for m in members)
+    member_count = len(members)
+    top1 = members[0] if members else {}
+    avg_level = round(sum(m["level"] for m in members) / member_count, 1) if member_count else 0
+
+    guild_summary = {
         "guild_name": guild_name,
-        "captured_at": datetime.now().isoformat(timespec="seconds"),
+        "captured_at": now,
         "total_power": total_power,
         "member_count": member_count,
         "server_rank": server_rank,
         "overall_rank": overall_rank,
         "guild_level": guild_level,
-        "top1_name": top1_name,
-        "top1_power": top1_power,
-        "top1_job": top1_job,
+        "top1_name": top1.get("name", ""),
+        "top1_power": top1.get("power", 0),
+        "top1_job": top1.get("job", ""),
     }
 
-def fetch_rival_guilds() -> list[dict]:
-    """경쟁 길드 데이터 수집"""
-    results = []
+    return guild_summary, members
+
+
+def fetch_rival_guilds() -> tuple[list[dict], list[dict]]:
+    """경쟁 길드 데이터 수집 → (길드 요약 리스트, 멤버 리스트)"""
+    summaries = []
+    all_members = []
     for guild_name, url in RIVAL_GUILDS.items():
         print(f"[경쟁 길드] 수집 중: {guild_name}")
         try:
             html = fetch_page(url, retries=2)
-            data = parse_rival_guild(html, guild_name)
-            results.append(data)
-            print(f"  -> 전투력: {data['total_power']}, 인원: {data['member_count']}명")
+            summary, members = parse_rival_guild(html, guild_name)
+            summaries.append(summary)
+            all_members.extend(members)
+            print(f"  -> 전투력: {summary['total_power']}, 인원: {summary['member_count']}명")
         except Exception as e:
             print(f"  -> 오류: {e}")
         time.sleep(REQUEST_DELAY_SECONDS)
-    return results
+    return summaries, all_members

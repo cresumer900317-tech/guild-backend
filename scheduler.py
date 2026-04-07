@@ -126,10 +126,16 @@ def run_rival_crawl():
     logger.info("=== [경쟁 길드] 크롤링 시작 ===")
     try:
         from fetch_mgf import fetch_rival_guilds
-        rivals = fetch_rival_guilds()
-        if rivals:
-            supabase.table("rival_guilds").insert(rivals).execute()
-            logger.info(f"[경쟁 길드] {len(rivals)}개 저장 완료")
+        summaries, members = fetch_rival_guilds()
+        if summaries:
+            supabase.table("rival_guilds").insert(summaries).execute()
+            logger.info(f"[경쟁 길드] 요약 {len(summaries)}개 저장")
+        if members:
+            # 기존 데이터 삭제 후 최신으로 교체
+            for guild_name in set(m["guild_name"] for m in members):
+                supabase.table("rival_members")                    .delete()                    .eq("guild_name", guild_name)                    .execute()
+            supabase.table("rival_members").insert(members).execute()
+            logger.info(f"[경쟁 길드] 멤버 {len(members)}명 저장")
     except Exception as e:
         logger.error(f"경쟁 길드 크롤링 오류: {e}")
 

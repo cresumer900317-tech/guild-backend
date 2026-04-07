@@ -219,41 +219,96 @@ def manual_snapshot():
 @app.get("/api/rivals")
 def get_rivals():
     """
-    경쟁 길드 최신 데이터 + 친구패밀리 합산 데이터 반환
-    각 길드별 가장 최근 레코드만 반환
+    경쟁 길드 + 친구들(메인 길드) 비교 데이터
+    멤버 리스트 포함
     """
-    # 경쟁 길드 최신 데이터
+    now = datetime.now()
+
+    # ── 친구들 멤버 (members 테이블에서 친구들만) ──
+    friends_result = supabase.table("members")        .select("*")        .eq("guild", "친구들")        .execute()
+    friends_members = sorted(
+        friends_result.data or [],
+        key=lambda m: m.get("power") or 0,
+        reverse=True
+    )
+
+    friends_total = sum(m.get("power") or 0 for m in friends_members)
+    friends_count = len(friends_members)
+    friends_avg_level = round(
+        sum(m.get("level") or 0 for m in friends_members) / friends_count, 1
+    ) if friends_count else 0
+    friends_top1 = friends_members[0] if friends_members else {}
+
+    # 월간 성장량 계산
+    snapshot_month = now.strftime("%Y-%m")
+    snap_result = supabase.table("monthly_snapshots")        .select("name,power")        .eq("snapshot_month", snapshot_month)        .execute()
+    snap_map = {s["name"]: s["power"] or 0 for s in (snap_result.data or [])}
+    friends_monthly_growth = sum(
+        (m.get("power") or 0) - snap_map.get(m["name"], m.get("power") or 0)
+        for m in friends_members
+        if m["name"] in snap_map
+    )
+
+    friends_guild = {
+        "guild_name": "친구들",
+        "captured_at": now.isoformat(),
+        "total_power": friends_total,
+        "member_count": friends_count,
+        "avg_level": friends_avg_level,
+        "monthly_growth": friends_monthly_growth,
+        "top1_name": friends_top1.get("name", ""),
+        "top1_power": friends_top1.get("power", 0),
+        "top1_job": friends_top1.get("job", ""),
+        "members": [
+            {
+                "name": m.get("name"),
+                "job": m.get("job"),
+                "level": m.get("level"),
+                "power": m.get("power"),
+                "power_text": m.get("power_text"),
+                "guild_rank": m.get("guild_rank"),
+                "detail_url": m.get("detail_url"),
+            }
+            for m in friends_members
+        ],
+    }
+
+    # ── 경쟁 길드 (rival_guilds + rival_members) ──
     rival_names = ["싸이월드", "리안"]
     rivals = []
     for name in rival_names:
-        result = supabase.table("rival_guilds")            .select("*")            .eq("guild_name", name)            .order("captured_at", desc=True)            .limit(1)            .execute()
-        if result.data:
-            rivals.append(result.data[0])
+        summary_result = supabase.table("rival_guilds")            .select("*")            .eq("guild_name", name)            .order("captured_at", desc=True)            .limit(1)            .execute()
+        if not summary_result.data:
+            continue
+        summary = summary_result.data[0]
 
-    # 친구패밀리 현재 데이터 계산
-    members_result = supabase.table("members").select("*").execute()
-    members = members_result.data or []
+        members_result = supabase.table("rival_members")            .select("*")            .eq("guild_name", name)            .order("guild_rank")            .execute()
+        rival_members = members_result.data or []
 
-    total_power = sum(m.get("power") or 0 for m in members)
-    member_count = len(members)
-    sorted_members = sorted(members, key=lambda m: m.get("power") or 0, reverse=True)
-    top1 = sorted_members[0] if sorted_members else None
+        avg_level = round(
+            sum(m.get("level") or 0 for m in rival_members) / len(rival_members), 1
+        ) if rival_members else 0
 
-    friends_family = {
-        "guild_name": "친구패밀리",
-        "captured_at": datetime.now().isoformat(),
-        "total_power": total_power,
-        "member_count": member_count,
-        "server_rank": 2,  # 친구들 기준
-        "top1_name": top1["name"] if top1 else "",
-        "top1_power": top1["power"] if top1 else 0,
-        "top1_job": top1["job"] if top1 else "",
-    }
+        rivals.append({
+            **summary,
+            "avg_level": avg_level,
+            "monthly_growth": None,  # 경쟁 길드는 스냅샷 없음
+            "members": [
+                {
+                    "name": m.get("name"),
+                    "job": m.get("job"),
+                    "level": m.get("level"),
+                    "power": m.get("power"),
+                    "power_text": m.get("power_text"),
+                    "guild_rank": m.get("guild_rank"),
+                    "detail_url": None,
+                }
+                for m in rival_members
+            ],
+        })
 
-    all_guilds = [friends_family] + rivals
-    # 총 전투력 기준 정렬
+    all_guilds = [friends_guild] + rivals
     all_guilds.sort(key=lambda x: x.get("total_power") or 0, reverse=True)
-
     return all_guilds
 
 
