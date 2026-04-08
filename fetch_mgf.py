@@ -297,11 +297,21 @@ def fetch_rival_guilds() -> tuple[list[dict], list[dict]]:
         print(f"[경쟁 길드] 수집 중: {guild_name}")
         try:
             html = fetch_page(url, retries=2)
+            # 디버그: HTML 첫 500자 + tr/power-tooltip 개수 확인
+            from bs4 import BeautifulSoup as _BS
+            _soup = _BS(html, "html.parser")
+            _trs = _soup.select("tr")
+            _pts = _soup.select(".power-tooltip")
+            _char_links = _soup.select("a[href*='character.php']")
+            print(f"  [디버그] tr={len(_trs)}, .power-tooltip={len(_pts)}, character links={len(_char_links)}")
+            print(f"  [디버그] HTML 길이={len(html)}")
             summary, members = parse_rival_guild(html, guild_name)
             summaries.append(summary)
             all_members.extend(members)
             print(f"  -> 전투력: {summary['total_power']}, 인원: {summary['member_count']}명")
         except Exception as e:
+            import traceback
             print(f"  -> 오류: {e}")
+            print(traceback.format_exc())
         time.sleep(REQUEST_DELAY_SECONDS)
     return summaries, all_members
