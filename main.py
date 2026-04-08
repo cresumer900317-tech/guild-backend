@@ -150,15 +150,6 @@ def get_monthly():
     return result
 
 
-@app.get("/api/notices")
-def get_notices():
-    result = supabase.table("notices")\
-        .select("*")\
-        .order("created_at", desc=True)\
-        .execute()
-    return result.data
-
-
 @app.get("/api/home-summary")
 def get_home_summary():
     result = supabase.table("members").select("*").execute()
