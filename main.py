@@ -689,7 +689,8 @@ def get_visitor_stats():
     total_count = sum(r["count"] for r in (all_stats.data or []))
 
     # 현재 접속자 (최근 5분)
-    five_min_ago = (now.replace(microsecond=0) - __import__("datetime").timedelta(minutes=5)).isoformat()
+    from datetime import timedelta
+    five_min_ago = (now.replace(microsecond=0) - timedelta(minutes=5)).isoformat()
     online = supabase.table("visitors")        .select("session_id, character_name")        .gte("last_seen", five_min_ago)        .execute()
     online_list = online.data or []
     online_count = len(online_list)
