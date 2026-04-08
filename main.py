@@ -637,3 +637,68 @@ def change_role(payload: dict):
         raise HTTPException(status_code=400, detail="잘못된 요청")
     supabase.table("users").update({"role": new_role})        .eq("character_name", character_name).execute()
     return {"status": "ok", "message": f"{character_name} → {new_role}"}
+
+
+# ── 방문자 API ──────────────────────────────────────────────
+
+@app.post("/api/visitors/ping")
+def visitor_ping(payload: dict):
+    """방문자 핑 (페이지 로드시 호출)"""
+    session_id = payload.get("session_id", "")
+    character_name = payload.get("character_name", "guest")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id 필수")
+
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+
+    # visitors 테이블 upsert (session_id 기준)
+    existing = supabase.table("visitors")        .select("id, created_at")        .eq("session_id", session_id)        .execute()
+
+    is_new = not existing.data
+
+    supabase.table("visitors").upsert({
+        "session_id": session_id,
+        "character_name": character_name,
+        "last_seen": now.isoformat(),
+    }, on_conflict="session_id").execute()
+
+    # 오늘 방문 카운트 (새 세션만)
+    if is_new:
+        stat = supabase.table("visit_stats")            .select("count")            .eq("date", today)            .execute()
+        if stat.data:
+            supabase.table("visit_stats")                .update({"count": stat.data[0]["count"] + 1})                .eq("date", today).execute()
+        else:
+            supabase.table("visit_stats")                .insert({"date": today, "count": 1}).execute()
+
+    return {"status": "ok", "is_new": is_new}
+
+
+@app.get("/api/visitors/stats")
+def get_visitor_stats():
+    """방문자 통계"""
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+
+    # 오늘 방문자
+    today_stat = supabase.table("visit_stats")        .select("count").eq("date", today).execute()
+    today_count = today_stat.data[0]["count"] if today_stat.data else 0
+
+    # 전체 방문자
+    all_stats = supabase.table("visit_stats").select("count").execute()
+    total_count = sum(r["count"] for r in (all_stats.data or []))
+
+    # 현재 접속자 (최근 5분)
+    five_min_ago = (now.replace(microsecond=0) - __import__("datetime").timedelta(minutes=5)).isoformat()
+    online = supabase.table("visitors")        .select("session_id, character_name")        .gte("last_seen", five_min_ago)        .execute()
+    online_list = online.data or []
+    online_count = len(online_list)
+
+    return {
+        "today": today_count,
+        "total": total_count,
+        "online": online_count,
+        "online_list": [
+            {"name": r["character_name"]} for r in online_list
+        ],
+    }
