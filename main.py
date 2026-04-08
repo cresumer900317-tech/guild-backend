@@ -555,3 +555,74 @@ def delete_user(character_name: str):
     """유저 삭제"""
     supabase.table("users").delete().eq("character_name", character_name).execute()
     return {"status": "ok", "message": f"{character_name} 삭제 완료"}
+
+
+# ── 공지사항 API ──────────────────────────────────────────────
+
+@app.get("/api/notices")
+def get_notices():
+    result = supabase.table("notices")        .select("*")        .order("is_pinned", desc=True)        .order("created_at", desc=True)        .execute()
+    return result.data or []
+
+@app.post("/api/notices")
+def create_notice(payload: dict):
+    title = (payload.get("title") or "").strip()
+    content = (payload.get("content") or "").strip()
+    category = payload.get("category", "공지")
+    author = payload.get("author", "운영진")
+    author_guild = payload.get("author_guild", "")
+    is_pinned = payload.get("is_pinned", False)
+    if not title or not content:
+        raise HTTPException(status_code=400, detail="제목과 내용을 입력해주세요")
+    result = supabase.table("notices").insert({
+        "title": title, "content": content, "category": category,
+        "author": author, "author_guild": author_guild, "is_pinned": is_pinned,
+    }).execute()
+    return result.data[0] if result.data else {}
+
+@app.delete("/api/notices/{notice_id}")
+def delete_notice(notice_id: int):
+    supabase.table("notices").delete().eq("id", notice_id).execute()
+    return {"status": "ok"}
+
+
+# ── 꿀팁 API ──────────────────────────────────────────────────
+
+@app.get("/api/tips")
+def get_tips(category: str = None):
+    query = supabase.table("tips").select("*").order("created_at", desc=True)
+    if category:
+        query = query.eq("category", category)
+    result = query.execute()
+    return result.data or []
+
+@app.post("/api/tips")
+def create_tip(payload: dict):
+    title = (payload.get("title") or "").strip()
+    content = (payload.get("content") or "").strip()
+    category = payload.get("category", "일반")
+    author = payload.get("author", "")
+    author_guild = payload.get("author_guild", "")
+    if not title or not content:
+        raise HTTPException(status_code=400, detail="제목과 내용을 입력해주세요")
+    if not author:
+        raise HTTPException(status_code=400, detail="로그인이 필요합니다")
+    result = supabase.table("tips").insert({
+        "title": title, "content": content, "category": category,
+        "author": author, "author_guild": author_guild, "likes": 0,
+    }).execute()
+    return result.data[0] if result.data else {}
+
+@app.post("/api/tips/{tip_id}/like")
+def like_tip(tip_id: int):
+    result = supabase.table("tips").select("likes").eq("id", tip_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    current = result.data[0]["likes"] or 0
+    supabase.table("tips").update({"likes": current + 1}).eq("id", tip_id).execute()
+    return {"likes": current + 1}
+
+@app.delete("/api/tips/{tip_id}")
+def delete_tip(tip_id: int):
+    supabase.table("tips").delete().eq("id", tip_id).execute()
+    return {"status": "ok"}
