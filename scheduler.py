@@ -170,6 +170,38 @@ def run_crawl_and_snapshot():
         save_monthly_snapshot(members)
 
 
+def run_pop_rank_update():
+    """인기도 서버 순위 크롤링 → DB 업데이트 (6시간마다)"""
+    logger.info("=== [인기도 순위] 업데이트 시작 ===")
+    try:
+        from fetch_mgf import fetch_popularity_rank
+        result = supabase.table("members").select("id, name").execute()
+        members = result.data or []
+        if not members:
+            logger.info("[인기도 순위] 멤버 없음")
+            return
+
+        name_to_id = {m["name"]: m["id"] for m in members}
+        rank_map = fetch_popularity_rank(set(name_to_id.keys()))
+
+        updated = 0
+        for name, pop_rank in rank_map.items():
+            mid = name_to_id.get(name)
+            if mid:
+                supabase.table("members").update({"pop_server_rank": pop_rank}).eq("id", mid).execute()
+                updated += 1
+
+        # 미발견 멤버는 null 처리
+        for name in (set(name_to_id.keys()) - set(rank_map.keys())):
+            mid = name_to_id.get(name)
+            if mid:
+                supabase.table("members").update({"pop_server_rank": None}).eq("id", mid).execute()
+
+        logger.info(f"=== [인기도 순위] 완료: {updated}명 갱신 ===")
+    except Exception as e:
+        logger.error(f"[인기도 순위] 오류: {e}")
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler()
 
@@ -178,6 +210,9 @@ def start_scheduler():
 
     # 1시간마다 경쟁 길드 크롤링
     scheduler.add_job(run_rival_crawl, IntervalTrigger(hours=1))
+
+    # 1시간마다 인기도 서버 순위 업데이트
+    scheduler.add_job(run_pop_rank_update, IntervalTrigger(hours=1))
 
     # 매달 1일 00:05에 크롤링 + 월간 스냅샷 저장
     scheduler.add_job(

@@ -314,6 +314,81 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
     return guild_summary, members
 
 
+# ── 인기도 서버 순위 크롤링 ────────────────────────────────
+POP_RANK_URL = "https://mgf.gg/ranking/pop.php?server=11&recent=1&stx=&page={page}"
+FRIEND_GUILDS = {"친구들", "친구둘", "친구삼", "친구넷", "친구닷"}
+
+def fetch_popularity_rank(member_names: set[str], max_pages: int = 30) -> dict[str, int]:
+    """
+    mgf.gg 스카니아11 인기도 랭킹 페이지를 순회하며
+    친구패밀리 멤버의 서버 인기도 순위를 반환.
+    반환값: { 닉네임: 서버_인기도_순위 }
+    멤버 전원 발견 또는 max_pages 도달 시 조기 종료.
+    """
+    found: dict[str, int] = {}
+    remaining = set(member_names)
+    empty_streak = 0
+
+    for page in range(1, max_pages + 1):
+        if not remaining:
+            break
+        url = POP_RANK_URL.format(page=page)
+        try:
+            html = fetch_page(url, retries=2)
+        except Exception as e:
+            print(f"[인기도 랭킹] 페이지 {page} 오류: {e}")
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select("table.rank-table tr")
+
+        page_has_friend = False
+        for row in rows:
+            # 순위: span.rank-total
+            rank_el = row.select_one("span.rank-total")
+            if not rank_el:
+                continue
+            rank_m = re.match(r"(\d+)", rank_el.get_text(strip=True))
+            if not rank_m:
+                continue
+            server_pop_rank = int(rank_m.group(1))
+
+            # 길드명: span.badge-guild
+            guild_el = row.select_one("span.badge-guild")
+            guild_name = guild_el.get_text(strip=True) if guild_el else ""
+            if guild_name not in FRIEND_GUILDS:
+                continue
+
+            page_has_friend = True
+
+            # 닉네임: span.nickname
+            nick_el = row.select_one("span.nickname")
+            if not nick_el:
+                continue
+            name = nick_el.get_text(strip=True)
+            if not name:
+                continue
+
+            if name in remaining:
+                found[name] = server_pop_rank
+                remaining.discard(name)
+                print(f"[인기도 랭킹] {name} → 서버 {server_pop_rank}위 발견")
+
+        # 친구패밀리가 없는 페이지 3개 연속이면 조기 종료
+        if page_has_friend:
+            empty_streak = 0
+        else:
+            empty_streak += 1
+            if empty_streak >= 3 and page > 5:
+                print(f"[인기도 랭킹] 빈 페이지 {empty_streak}연속 → 종료")
+                break
+
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    print(f"[인기도 랭킹] 수집 완료: {len(found)}명 / 전체 {len(member_names)}명")
+    return found
+
+
 def fetch_rival_guilds() -> tuple[list[dict], list[dict]]:
     """경쟁 길드 데이터 수집 → (길드 요약 리스트, 멤버 리스트)"""
     summaries = []
