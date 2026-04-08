@@ -249,6 +249,21 @@ def get_rivals():
         if m["name"] in snap_map
     )
 
+    # 친구들 공헌도 합산
+    contrib_month = now.strftime("%Y-%m")
+    contrib_result = supabase.table("guild_contributions")        .select("contribution")        .eq("month", contrib_month)        .eq("guild_name", "친구들")        .execute()
+    friends_contribution = sum(r.get("contribution", 0) for r in (contrib_result.data or []))
+
+    # 친구들 인기도 합산
+    friends_popularity = sum(m.get("popularity") or 0 for m in friends_members)
+
+    # 친구들 성장률
+    friends_growth_rate = None
+    if friends_monthly_growth and friends_total:
+        base = friends_total - friends_monthly_growth
+        if base > 0:
+            friends_growth_rate = round(friends_monthly_growth / base * 100, 2)
+
     friends_guild = {
         "guild_name": "친구들",
         "captured_at": now.isoformat(),
@@ -256,6 +271,9 @@ def get_rivals():
         "member_count": friends_count,
         "avg_level": friends_avg_level,
         "monthly_growth": friends_monthly_growth,
+        "growth_rate": friends_growth_rate,
+        "total_popularity": friends_popularity,
+        "total_contribution": friends_contribution,
         "top1_name": friends_top1.get("name", ""),
         "top1_power": friends_top1.get("power", 0),
         "top1_job": friends_top1.get("job", ""),
@@ -318,3 +336,67 @@ def manual_rival_crawl():
     from scheduler import run_rival_crawl
     run_rival_crawl()
     return {"status": "ok", "message": "경쟁 길드 크롤링 완료"}
+
+
+# ── 공헌도 API ──────────────────────────────────────────────
+
+@app.get("/api/contributions")
+def get_contributions(month: str = None):
+    """월별 길드 공헌도 조회"""
+    if not month:
+        from datetime import datetime
+        month = datetime.now().strftime("%Y-%m")
+    result = supabase.table("guild_contributions")        .select("*")        .eq("month", month)        .order("contribution", desc=True)        .execute()
+    rows = result.data or []
+
+    # 길드별 합산
+    from collections import defaultdict
+    guild_totals = defaultdict(int)
+    guild_members = defaultdict(list)
+    for row in rows:
+        guild_totals[row["guild_name"]] += row["contribution"]
+        guild_members[row["guild_name"]].append({
+            "name": row["member_name"],
+            "contribution": row["contribution"],
+        })
+
+    return {
+        "month": month,
+        "guilds": [
+            {
+                "guild_name": g,
+                "total": guild_totals[g],
+                "members": guild_members[g],
+            }
+            for g in guild_totals
+        ],
+        "rows": rows,
+    }
+
+
+@app.post("/api/contributions")
+def upsert_contribution(payload: dict):
+    """공헌도 입력/수정 (upsert)"""
+    month = payload.get("month")
+    guild_name = payload.get("guild_name")
+    member_name = payload.get("member_name")
+    contribution = int(payload.get("contribution", 0))
+
+    if not all([month, guild_name, member_name]):
+        raise HTTPException(status_code=400, detail="month, guild_name, member_name 필수")
+
+    supabase.table("guild_contributions").upsert({
+        "month": month,
+        "guild_name": guild_name,
+        "member_name": member_name,
+        "contribution": contribution,
+    }, on_conflict="month,guild_name,member_name").execute()
+
+    return {"status": "ok", "message": f"{member_name} 공헌도 저장 완료"}
+
+
+@app.delete("/api/contributions")
+def delete_contribution(month: str, guild_name: str, member_name: str):
+    """공헌도 삭제"""
+    supabase.table("guild_contributions")        .delete()        .eq("month", month)        .eq("guild_name", guild_name)        .eq("member_name", member_name)        .execute()
+    return {"status": "ok"}
