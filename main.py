@@ -1,10 +1,60 @@
 from contextlib import asynccontextmanager
+from typing import Optional, Literal
+from pydantic import BaseModel, field_validator
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
 from database import supabase
 from scheduler import start_scheduler
 from datetime import datetime
+
+
+# ── Pydantic 요청 모델 ────────────────────────────────────────
+
+class AuthRequest(BaseModel):
+    character_name: str
+    password: str
+
+    @field_validator("character_name", "password", mode="before")
+    @classmethod
+    def strip_str(cls, v):
+        return (v or "").strip()
+
+class ApproveRequest(BaseModel):
+    character_name: str
+    guild: Optional[str] = None
+
+class CharacterRequest(BaseModel):
+    character_name: str
+
+class RoleChangeRequest(BaseModel):
+    character_name: str
+    role: Literal["member", "admin", "superadmin"]
+
+class NoticeCreate(BaseModel):
+    title: str
+    content: str
+    category: str = "공지"
+    author: str = "운영진"
+    author_guild: str = ""
+    is_pinned: bool = False
+
+class TipCreate(BaseModel):
+    title: str
+    content: str
+    category: str = "일반"
+    author: str = ""
+    author_guild: str = ""
+
+class ContributionUpsert(BaseModel):
+    month: str
+    guild_name: str
+    member_name: str
+    contribution: int = 0
+
+class VisitorPing(BaseModel):
+    session_id: str
+    character_name: str = "guest"
 
 
 def to_camel(members):
@@ -28,6 +78,7 @@ def to_camel(members):
             "weeklyDiff": m.get("weekly_diff"),
             "growthRate": m.get("growth_rate"),
             "popularity": m.get("popularity"),
+            "popServerRank": m.get("pop_server_rank"),
             "detailUrl": m.get("detail_url"),
             "isMaster": m.get("is_master", False),
             "rank": m.get("rank"),
@@ -72,6 +123,57 @@ def get_members():
         .select("*")\
         .execute()
     return to_camel(result.data)
+
+
+@app.post("/api/update-pop-rank")
+def update_pop_rank():
+    """
+    mgf.gg 스카니아11 인기도 랭킹 페이지를 크롤링해서
+    members 테이블의 pop_server_rank 컬럼을 업데이트.
+    """
+    from fetch_mgf import fetch_popularity_rank
+    try:
+        # 현재 DB에 있는 멤버 닉네임 목록 가져오기
+        result = supabase.table("members").select("id, name").execute()
+        members = result.data or []
+        if not members:
+            return {"status": "ok", "updated": 0, "message": "멤버 없음"}
+
+        name_to_id = {m["name"]: m["id"] for m in members}
+        member_names = set(name_to_id.keys())
+
+        # 인기도 랭킹 크롤링
+        rank_map = fetch_popularity_rank(member_names)
+
+        # DB 업데이트: 발견된 멤버만 pop_server_rank 갱신
+        updated = 0
+        for name, pop_rank in rank_map.items():
+            member_id = name_to_id.get(name)
+            if member_id:
+                supabase.table("members")\
+                    .update({"pop_server_rank": pop_rank})\
+                    .eq("id", member_id)\
+                    .execute()
+                updated += 1
+
+        # 랭킹 미발견 멤버는 pop_server_rank = null 로 초기화
+        not_found = member_names - set(rank_map.keys())
+        for name in not_found:
+            member_id = name_to_id.get(name)
+            if member_id:
+                supabase.table("members")\
+                    .update({"pop_server_rank": None})\
+                    .eq("id", member_id)\
+                    .execute()
+
+        return {
+            "status": "ok",
+            "updated": updated,
+            "not_found": len(not_found),
+            "message": f"{updated}명 인기도 순위 갱신 완료"
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/weekly")
@@ -393,24 +495,16 @@ def get_contributions(month: str = None):
 
 
 @app.post("/api/contributions")
-def upsert_contribution(payload: dict):
+def upsert_contribution(req: ContributionUpsert):
     """공헌도 입력/수정 (upsert)"""
-    month = payload.get("month")
-    guild_name = payload.get("guild_name")
-    member_name = payload.get("member_name")
-    contribution = int(payload.get("contribution", 0))
-
-    if not all([month, guild_name, member_name]):
-        raise HTTPException(status_code=400, detail="month, guild_name, member_name 필수")
-
     supabase.table("guild_contributions").upsert({
-        "month": month,
-        "guild_name": guild_name,
-        "member_name": member_name,
-        "contribution": contribution,
+        "month": req.month,
+        "guild_name": req.guild_name,
+        "member_name": req.member_name,
+        "contribution": req.contribution,
     }, on_conflict="month,guild_name,member_name").execute()
 
-    return {"status": "ok", "message": f"{member_name} 공헌도 저장 완료"}
+    return {"status": "ok", "message": f"{req.member_name} 공헌도 저장 완료"}
 
 
 @app.delete("/api/contributions")
@@ -423,10 +517,10 @@ def delete_contribution(month: str, guild_name: str, member_name: str):
 # ── 회원 API ──────────────────────────────────────────────────
 
 @app.post("/api/auth/register")
-def register(payload: dict):
+def register(req: AuthRequest):
     """회원가입"""
-    character_name = (payload.get("character_name") or "").strip()
-    password = (payload.get("password") or "").strip()
+    character_name = req.character_name
+    password = req.password
 
     if not character_name or not password:
         raise HTTPException(status_code=400, detail="캐릭터명과 비밀번호를 입력해주세요")
@@ -466,10 +560,10 @@ def register(payload: dict):
 
 
 @app.post("/api/auth/login")
-def login(payload: dict):
+def login(req: AuthRequest):
     """로그인"""
-    character_name = (payload.get("character_name") or "").strip()
-    password = (payload.get("password") or "").strip()
+    character_name = req.character_name
+    password = req.password
 
     if not character_name or not password:
         raise HTTPException(status_code=400, detail="캐릭터명과 비밀번호를 입력해주세요")
@@ -511,34 +605,25 @@ def get_users(status: str = None):
 
 
 @app.post("/api/auth/approve")
-def approve_user(payload: dict):
+def approve_user(req: ApproveRequest):
     """유저 승인 (어드민용)"""
-    character_name = payload.get("character_name")
-    guild = payload.get("guild")
-    if not character_name:
-        raise HTTPException(status_code=400, detail="character_name 필수")
-
     supabase.table("users").update({
         "status": "active",
-        "guild": guild,
+        "guild": req.guild,
         "approved_at": datetime.now().isoformat(),
-    }).eq("character_name", character_name).execute()
+    }).eq("character_name", req.character_name).execute()
 
-    return {"status": "ok", "message": f"{character_name} 승인 완료"}
+    return {"status": "ok", "message": f"{req.character_name} 승인 완료"}
 
 
 @app.post("/api/auth/deactivate")
-def deactivate_user(payload: dict):
+def deactivate_user(req: CharacterRequest):
     """유저 비활성화 (길드 탈퇴 등)"""
-    character_name = payload.get("character_name")
-    if not character_name:
-        raise HTTPException(status_code=400, detail="character_name 필수")
-
     supabase.table("users").update({
         "status": "inactive",
-    }).eq("character_name", character_name).execute()
+    }).eq("character_name", req.character_name).execute()
 
-    return {"status": "ok", "message": f"{character_name} 비활성화 완료"}
+    return {"status": "ok", "message": f"{req.character_name} 비활성화 완료"}
 
 
 @app.delete("/api/auth/users/{character_name}")
@@ -556,18 +641,14 @@ def get_notices():
     return result.data or []
 
 @app.post("/api/notices")
-def create_notice(payload: dict):
-    title = (payload.get("title") or "").strip()
-    content = (payload.get("content") or "").strip()
-    category = payload.get("category", "공지")
-    author = payload.get("author", "운영진")
-    author_guild = payload.get("author_guild", "")
-    is_pinned = payload.get("is_pinned", False)
+def create_notice(req: NoticeCreate):
+    title = req.title.strip()
+    content = req.content.strip()
     if not title or not content:
         raise HTTPException(status_code=400, detail="제목과 내용을 입력해주세요")
     result = supabase.table("notices").insert({
-        "title": title, "content": content, "category": category,
-        "author": author, "author_guild": author_guild, "is_pinned": is_pinned,
+        "title": title, "content": content, "category": req.category,
+        "author": req.author, "author_guild": req.author_guild, "is_pinned": req.is_pinned,
     }).execute()
     return result.data[0] if result.data else {}
 
@@ -588,19 +669,16 @@ def get_tips(category: str = None):
     return result.data or []
 
 @app.post("/api/tips")
-def create_tip(payload: dict):
-    title = (payload.get("title") or "").strip()
-    content = (payload.get("content") or "").strip()
-    category = payload.get("category", "일반")
-    author = payload.get("author", "")
-    author_guild = payload.get("author_guild", "")
+def create_tip(req: TipCreate):
+    title = req.title.strip()
+    content = req.content.strip()
     if not title or not content:
         raise HTTPException(status_code=400, detail="제목과 내용을 입력해주세요")
-    if not author:
+    if not req.author:
         raise HTTPException(status_code=400, detail="로그인이 필요합니다")
     result = supabase.table("tips").insert({
-        "title": title, "content": content, "category": category,
-        "author": author, "author_guild": author_guild, "likes": 0,
+        "title": title, "content": content, "category": req.category,
+        "author": req.author, "author_guild": req.author_guild, "likes": 0,
     }).execute()
     return result.data[0] if result.data else {}
 
@@ -620,37 +698,28 @@ def delete_tip(tip_id: int):
 
 
 @app.post("/api/auth/role")
-def change_role(payload: dict):
+def change_role(req: RoleChangeRequest):
     """role 변경 (superadmin 전용)"""
-    character_name = payload.get("character_name")
-    new_role = payload.get("role")
-    if not character_name or new_role not in ["member", "admin", "superadmin"]:
-        raise HTTPException(status_code=400, detail="잘못된 요청")
-    supabase.table("users").update({"role": new_role})        .eq("character_name", character_name).execute()
-    return {"status": "ok", "message": f"{character_name} → {new_role}"}
+    supabase.table("users").update({"role": req.role})        .eq("character_name", req.character_name).execute()
+    return {"status": "ok", "message": f"{req.character_name} → {req.role}"}
 
 
 # ── 방문자 API ──────────────────────────────────────────────
 
 @app.post("/api/visitors/ping")
-def visitor_ping(payload: dict):
+def visitor_ping(req: VisitorPing):
     """방문자 핑 (페이지 로드시 호출)"""
-    session_id = payload.get("session_id", "")
-    character_name = payload.get("character_name", "guest")
-    if not session_id:
-        raise HTTPException(status_code=400, detail="session_id 필수")
-
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
 
     # visitors 테이블 upsert (session_id 기준)
-    existing = supabase.table("visitors")        .select("id, created_at")        .eq("session_id", session_id)        .execute()
+    existing = supabase.table("visitors")        .select("id, created_at")        .eq("session_id", req.session_id)        .execute()
 
     is_new = not existing.data
 
     supabase.table("visitors").upsert({
-        "session_id": session_id,
-        "character_name": character_name,
+        "session_id": req.session_id,
+        "character_name": req.character_name,
         "last_seen": now.isoformat(),
     }, on_conflict="session_id").execute()
 
