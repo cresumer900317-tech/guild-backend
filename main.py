@@ -1,12 +1,48 @@
 from contextlib import asynccontextmanager
 from typing import Optional, Literal
+import os
+import jwt
 from pydantic import BaseModel, field_validator
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
 from database import supabase
 from scheduler import start_scheduler
-from datetime import datetime
+from datetime import datetime, timedelta
+
+JWT_SECRET = os.environ.get("JWT_SECRET", "changeme-dev-secret")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 24
+
+
+def create_access_token(character_name: str, role: str) -> str:
+    payload = {
+        "sub": character_name,
+        "role": role,
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def get_current_user(authorization: str = Header(None)) -> dict:
+    """Authorization: Bearer <token> 헤더에서 유저 정보 추출"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다")
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"character_name": payload["sub"], "role": payload.get("role", "member")}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="토큰이 만료됐습니다. 다시 로그인해주세요")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
+
+
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """어드민 권한 체크"""
+    if current_user["role"] not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="관리자 권한이 필요합니다")
+    return current_user
 
 
 # ── Pydantic 요청 모델 ────────────────────────────────────────
@@ -583,8 +619,11 @@ def login(req: AuthRequest):
     if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="캐릭터명 또는 비밀번호가 틀렸습니다")
 
+    token = create_access_token(user["character_name"], user["role"])
+
     return {
         "status": "ok",
+        "token": token,
         "user": {
             "character_name": user["character_name"],
             "guild": user["guild"],
@@ -605,7 +644,7 @@ def get_users(status: str = None):
 
 
 @app.post("/api/auth/approve")
-def approve_user(req: ApproveRequest):
+def approve_user(req: ApproveRequest, admin: dict = Depends(require_admin)):
     """유저 승인 (어드민용)"""
     supabase.table("users").update({
         "status": "active",
@@ -617,7 +656,7 @@ def approve_user(req: ApproveRequest):
 
 
 @app.post("/api/auth/deactivate")
-def deactivate_user(req: CharacterRequest):
+def deactivate_user(req: CharacterRequest, admin: dict = Depends(require_admin)):
     """유저 비활성화 (길드 탈퇴 등)"""
     supabase.table("users").update({
         "status": "inactive",
@@ -641,7 +680,7 @@ def get_notices():
     return result.data or []
 
 @app.post("/api/notices")
-def create_notice(req: NoticeCreate):
+def create_notice(req: NoticeCreate, admin: dict = Depends(require_admin)):
     title = req.title.strip()
     content = req.content.strip()
     if not title or not content:
@@ -653,7 +692,7 @@ def create_notice(req: NoticeCreate):
     return result.data[0] if result.data else {}
 
 @app.delete("/api/notices/{notice_id}")
-def delete_notice(notice_id: int):
+def delete_notice(notice_id: int, admin: dict = Depends(require_admin)):
     supabase.table("notices").delete().eq("id", notice_id).execute()
     return {"status": "ok"}
 
@@ -698,7 +737,7 @@ def delete_tip(tip_id: int):
 
 
 @app.post("/api/auth/role")
-def change_role(req: RoleChangeRequest):
+def change_role(req: RoleChangeRequest, admin: dict = Depends(require_admin)):
     """role 변경 (superadmin 전용)"""
     supabase.table("users").update({"role": req.role})        .eq("character_name", req.character_name).execute()
     return {"status": "ok", "message": f"{req.character_name} → {req.role}"}

@@ -10,3 +10,4 @@ realtime
 requests
 beautifulsoup4
 bcrypt
+PyJWT
