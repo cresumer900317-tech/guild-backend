@@ -626,3 +626,14 @@ def like_tip(tip_id: int):
 def delete_tip(tip_id: int):
     supabase.table("tips").delete().eq("id", tip_id).execute()
     return {"status": "ok"}
+
+
+@app.post("/api/auth/role")
+def change_role(payload: dict):
+    """role 변경 (superadmin 전용)"""
+    character_name = payload.get("character_name")
+    new_role = payload.get("role")
+    if not character_name or new_role not in ["member", "admin", "superadmin"]:
+        raise HTTPException(status_code=400, detail="잘못된 요청")
+    supabase.table("users").update({"role": new_role})        .eq("character_name", character_name).execute()
+    return {"status": "ok", "message": f"{character_name} → {new_role}"}
