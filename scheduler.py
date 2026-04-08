@@ -121,6 +121,29 @@ def run_crawl():
         return []
 
 
+def save_rival_snapshot():
+    """경쟁 길드 월간 스냅샷 저장 (매달 1일 실행)"""
+    from datetime import datetime
+    month = datetime.now().strftime("%Y-%m")
+    logger.info(f"=== [경쟁 길드] 월간 스냅샷 저장: {month} ===")
+    try:
+        rival_names = ["싸이월드", "리안"]
+        for name in rival_names:
+            result = supabase.table("rival_guilds")                .select("total_power,member_count")                .eq("guild_name", name)                .order("captured_at", desc=True)                .limit(1)                .execute()
+            if not result.data:
+                continue
+            latest = result.data[0]
+            supabase.table("rival_snapshots").upsert({
+                "snapshot_month": month,
+                "guild_name": name,
+                "total_power": latest["total_power"],
+                "member_count": latest["member_count"],
+            }, on_conflict="snapshot_month,guild_name").execute()
+            logger.info(f"  [{name}] 스냅샷 저장: {latest['total_power']}")
+    except Exception as e:
+        logger.error(f"경쟁 길드 스냅샷 오류: {e}")
+
+
 def run_rival_crawl():
     """경쟁 길드 데이터 수집 및 저장"""
     logger.info("=== [경쟁 길드] 크롤링 시작 ===")
@@ -131,7 +154,6 @@ def run_rival_crawl():
             supabase.table("rival_guilds").insert(summaries).execute()
             logger.info(f"[경쟁 길드] 요약 {len(summaries)}개 저장")
         if members:
-            # 기존 데이터 삭제 후 최신으로 교체
             for guild_name in set(m["guild_name"] for m in members):
                 supabase.table("rival_members")                    .delete()                    .eq("guild_name", guild_name)                    .execute()
             supabase.table("rival_members").insert(members).execute()
@@ -161,6 +183,12 @@ def start_scheduler():
     scheduler.add_job(
         run_crawl_and_snapshot,
         CronTrigger(day=1, hour=0, minute=5)
+    )
+
+    # 매달 1일 00:10 경쟁 길드 스냅샷
+    scheduler.add_job(
+        save_rival_snapshot,
+        CronTrigger(day=1, hour=0, minute=10)
     )
 
     scheduler.start()

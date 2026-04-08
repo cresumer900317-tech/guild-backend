@@ -291,9 +291,11 @@ def get_rivals():
         ],
     }
 
-    # ── 경쟁 길드 (rival_guilds + rival_members) ──
+    # ── 경쟁 길드 (rival_guilds + rival_members + rival_snapshots) ──
     rival_names = ["싸이월드", "리안"]
     rivals = []
+    snap_month = now.strftime("%Y-%m")
+
     for name in rival_names:
         summary_result = supabase.table("rival_guilds")            .select("*")            .eq("guild_name", name)            .order("captured_at", desc=True)            .limit(1)            .execute()
         if not summary_result.data:
@@ -307,10 +309,26 @@ def get_rivals():
             sum(m.get("level") or 0 for m in rival_members) / len(rival_members), 1
         ) if rival_members else 0
 
+        total_popularity = sum(m.get("popularity") or 0 for m in rival_members)
+
+        # 월간 성장량 계산 (스냅샷과 현재 비교)
+        monthly_growth = None
+        growth_rate = None
+        snap_result = supabase.table("rival_snapshots")            .select("total_power")            .eq("snapshot_month", snap_month)            .eq("guild_name", name)            .limit(1)            .execute()
+        if snap_result.data:
+            snap_power = snap_result.data[0]["total_power"] or 0
+            current_power = summary.get("total_power") or 0
+            if snap_power > 0 and current_power > 0:
+                monthly_growth = current_power - snap_power
+                growth_rate = round(monthly_growth / snap_power * 100, 2)
+
         rivals.append({
             **summary,
             "avg_level": avg_level,
-            "monthly_growth": None,  # 경쟁 길드는 스냅샷 없음
+            "monthly_growth": monthly_growth,
+            "growth_rate": growth_rate,
+            "total_popularity": total_popularity,
+            "total_contribution": None,
             "members": [
                 {
                     "name": m.get("name"),
@@ -336,6 +354,14 @@ def manual_rival_crawl():
     from scheduler import run_rival_crawl
     run_rival_crawl()
     return {"status": "ok", "message": "경쟁 길드 크롤링 완료"}
+
+
+@app.post("/api/rivals/snapshot")
+def manual_rival_snapshot():
+    """경쟁 길드 수동 스냅샷 저장 (테스트용)"""
+    from scheduler import save_rival_snapshot
+    save_rival_snapshot()
+    return {"status": "ok", "message": "경쟁 길드 스냅샷 저장 완료"}
 
 
 # ── 공헌도 API ──────────────────────────────────────────────

@@ -238,6 +238,7 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
 
         # 이름: pt 이전의 title 있는 character.php 링크
         name = ""
+        tr_elem = pt  # 참조용
         prev_a = pt.find_previous("a", href=re.compile(r"character\.php"))
         if prev_a:
             name = prev_a.get("title") or prev_a.get_text(strip=True)
@@ -265,6 +266,10 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
             if lm:
                 level = int(lm.group(1))
 
+        # 인기도: 캐릭터 상세 페이지에서 파싱 시도 (없으면 0)
+        popularity = 0
+        detail_a = tr_elem.select_one("a.detail-btn") if hasattr(tr_elem, 'select_one') else None
+
         members.append({
             "captured_at": now,
             "guild_name": guild_name,
@@ -274,6 +279,7 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
             "power": pw,
             "power_text": pt.get_text(strip=True),
             "guild_rank": len(members) + 1,
+            "popularity": popularity,
         })
 
     # 길드 요약
