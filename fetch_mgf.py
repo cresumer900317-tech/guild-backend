@@ -209,7 +209,7 @@ RIVAL_GUILDS = {
 }
 
 def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
-    """경쟁 길드 페이지 HTML에서 길드 요약 + 멤버 전체 파싱 (tr + power-tooltip 기반)"""
+    """경쟁 길드 HTML 파싱 - power-tooltip 역방향 탐색 방식 (tr 없는 환경 대응)"""
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text("\n", strip=True)
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -226,34 +226,44 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
 
     guild_level = parse_guild_level(html)
 
-    # 멤버 파싱: tr 안에 a[href*=character.php] + .power-tooltip
+    # power-tooltip 목록: [0]=길드 총전투력, [1:]=멤버별
+    power_tips = soup.select(".power-tooltip")
+    member_power_tips = power_tips[1:] if len(power_tips) > 1 else power_tips
+
     members = []
-    for tr in soup.select("tr"):
-        name_el = tr.select_one("a[href*='character.php']")
-        power_el = tr.select_one(".power-tooltip")
-        if not (name_el and power_el):
-            continue
-        name = name_el.get_text(strip=True)
-        if not name:
-            continue
-        pw = convert_korean_power_to_int(power_el.get_text(strip=True))
+    for i, pt in enumerate(member_power_tips):
+        pw = convert_korean_power_to_int(pt.get_text(strip=True))
         if pw <= 0:
             continue
-        # 직업 (img src에서)
+
+        # 이름: pt 이전의 title 있는 character.php 링크
+        name = ""
+        prev_a = pt.find_previous("a", href=re.compile(r"character\.php"))
+        if prev_a:
+            name = prev_a.get("title") or prev_a.get_text(strip=True)
+        # 🔍 아이콘이면 한 단계 더 앞으로
+        if name in ["🔍", ""]:
+            prev_a = prev_a.find_previous("a", href=re.compile(r"character\.php")) if prev_a else None
+            if prev_a:
+                name = prev_a.get("title") or prev_a.get_text(strip=True)
+        if not name:
+            continue
+
+        # 직업: pt 이전의 companion_jobs img
         job = ""
-        img = tr.select_one("img[src*='companion_jobs']")
-        if img:
-            m = re.search(r"companion_jobs/(.+)\.png", img.get("src", ""))
+        prev_img = pt.find_previous("img", src=re.compile(r"companion_jobs"))
+        if prev_img:
+            m = re.search(r"companion_jobs/(.+)\.png", prev_img.get("src", ""))
             if m:
                 job = m.group(1)
-        # 레벨
+
+        # 레벨: pt 이전 텍스트에서 Lv.N
         level = 0
-        lm = re.search(r"Lv\.?(\d+)", tr.get_text())
-        if lm:
-            level = int(lm.group(1))
-        # 전투력 텍스트 (짧은 표시용)
-        td_texts = [td.get_text(strip=True) for td in tr.select("td")]
-        power_text = power_el.get_text(strip=True)
+        prev_text = pt.find_previous(string=re.compile(r"Lv\.?\d+"))
+        if prev_text:
+            lm = re.search(r"Lv\.?(\d+)", str(prev_text))
+            if lm:
+                level = int(lm.group(1))
 
         members.append({
             "captured_at": now,
@@ -262,11 +272,11 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
             "job": job,
             "level": level,
             "power": pw,
-            "power_text": power_text,
+            "power_text": pt.get_text(strip=True),
             "guild_rank": len(members) + 1,
         })
 
-    # 길드 요약 계산
+    # 길드 요약
     total_power = sum(m["power"] for m in members)
     member_count = len(members)
     top1 = members[0] if members else {}
