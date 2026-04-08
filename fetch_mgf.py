@@ -266,9 +266,18 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
             if lm:
                 level = int(lm.group(1))
 
-        # 인기도: 캐릭터 상세 페이지에서 파싱 시도 (없으면 0)
+        # 캐릭터 상세 URL
+        detail_url = f"https://mgf.gg/contents/character.php?n={requests.utils.quote(name)}"
+
+        # 인기도: 캐릭터 상세 페이지에서 파싱
         popularity = 0
-        detail_a = tr_elem.select_one("a.detail-btn") if hasattr(tr_elem, 'select_one') else None
+        try:
+            detail_html = fetch_page(detail_url, retries=DETAIL_REQUEST_RETRIES)
+            detail_info = parse_detail_page(detail_url)
+            popularity = detail_info.get("popularity", 0)
+            time.sleep(DETAIL_REQUEST_DELAY_SECONDS)
+        except Exception:
+            pass
 
         members.append({
             "captured_at": now,
