@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import bcrypt
 from database import supabase
 from scheduler import start_scheduler
 from datetime import datetime
@@ -426,3 +427,131 @@ def delete_contribution(month: str, guild_name: str, member_name: str):
     """공헌도 삭제"""
     supabase.table("guild_contributions")        .delete()        .eq("month", month)        .eq("guild_name", guild_name)        .eq("member_name", member_name)        .execute()
     return {"status": "ok"}
+
+
+# ── 회원 API ──────────────────────────────────────────────────
+
+@app.post("/api/auth/register")
+def register(payload: dict):
+    """회원가입"""
+    character_name = (payload.get("character_name") or "").strip()
+    password = (payload.get("password") or "").strip()
+
+    if not character_name or not password:
+        raise HTTPException(status_code=400, detail="캐릭터명과 비밀번호를 입력해주세요")
+    if len(password) < 4:
+        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
+
+    # 캐릭터명이 실제 길드원인지 확인
+    member_result = supabase.table("members")        .select("name, guild")        .eq("name", character_name)        .execute()
+    if not member_result.data:
+        raise HTTPException(status_code=404, detail="등록된 길드원이 아닙니다. 캐릭터명을 확인해주세요")
+
+    member = member_result.data[0]
+
+    # 이미 가입된 계정인지 확인
+    existing = supabase.table("users")        .select("id, status")        .eq("character_name", character_name)        .execute()
+    if existing.data:
+        status = existing.data[0]["status"]
+        if status == "pending":
+            raise HTTPException(status_code=409, detail="이미 가입 신청이 접수됐습니다. 운영진 승인을 기다려주세요")
+        elif status == "active":
+            raise HTTPException(status_code=409, detail="이미 가입된 계정입니다")
+        elif status == "inactive":
+            raise HTTPException(status_code=403, detail="비활성화된 계정입니다. 운영진에게 문의해주세요")
+
+    # 비밀번호 해시
+    pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    supabase.table("users").insert({
+        "character_name": character_name,
+        "password_hash": pw_hash,
+        "guild": member.get("guild", ""),
+        "status": "pending",
+        "role": "member",
+    }).execute()
+
+    return {"status": "ok", "message": "가입 신청이 완료됐습니다. 운영진 승인 후 이용 가능합니다"}
+
+
+@app.post("/api/auth/login")
+def login(payload: dict):
+    """로그인"""
+    character_name = (payload.get("character_name") or "").strip()
+    password = (payload.get("password") or "").strip()
+
+    if not character_name or not password:
+        raise HTTPException(status_code=400, detail="캐릭터명과 비밀번호를 입력해주세요")
+
+    result = supabase.table("users")        .select("*")        .eq("character_name", character_name)        .execute()
+
+    if not result.data:
+        raise HTTPException(status_code=401, detail="캐릭터명 또는 비밀번호가 틀렸습니다")
+
+    user = result.data[0]
+
+    if user["status"] == "pending":
+        raise HTTPException(status_code=403, detail="아직 승인 대기 중입니다. 운영진 승인 후 이용 가능합니다")
+    if user["status"] == "inactive":
+        raise HTTPException(status_code=403, detail="비활성화된 계정입니다. 운영진에게 문의해주세요")
+
+    if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        raise HTTPException(status_code=401, detail="캐릭터명 또는 비밀번호가 틀렸습니다")
+
+    return {
+        "status": "ok",
+        "user": {
+            "character_name": user["character_name"],
+            "guild": user["guild"],
+            "role": user["role"],
+            "status": user["status"],
+        }
+    }
+
+
+@app.get("/api/auth/users")
+def get_users(status: str = None):
+    """유저 목록 조회 (어드민용)"""
+    query = supabase.table("users").select("id,character_name,guild,status,role,created_at,approved_at")
+    if status:
+        query = query.eq("status", status)
+    result = query.order("created_at", desc=True).execute()
+    return result.data or []
+
+
+@app.post("/api/auth/approve")
+def approve_user(payload: dict):
+    """유저 승인 (어드민용)"""
+    character_name = payload.get("character_name")
+    guild = payload.get("guild")
+    if not character_name:
+        raise HTTPException(status_code=400, detail="character_name 필수")
+
+    supabase.table("users").update({
+        "status": "active",
+        "guild": guild,
+        "approved_at": datetime.now().isoformat(),
+    }).eq("character_name", character_name).execute()
+
+    return {"status": "ok", "message": f"{character_name} 승인 완료"}
+
+
+@app.post("/api/auth/deactivate")
+def deactivate_user(payload: dict):
+    """유저 비활성화 (길드 탈퇴 등)"""
+    character_name = payload.get("character_name")
+    if not character_name:
+        raise HTTPException(status_code=400, detail="character_name 필수")
+
+    supabase.table("users").update({
+        "status": "inactive",
+    }).eq("character_name", character_name).execute()
+
+    return {"status": "ok", "message": f"{character_name} 비활성화 완료"}
+
+
+@app.delete("/api/auth/users/{character_name}")
+def delete_user(character_name: str):
+    """유저 삭제"""
+    supabase.table("users").delete().eq("character_name", character_name).execute()
+    return {"status": "ok", "message": f"{character_name} 삭제 완료"}

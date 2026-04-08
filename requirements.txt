@@ -9,3 +9,4 @@ gotrue
 realtime
 requests
 beautifulsoup4
+bcrypt
