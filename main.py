@@ -259,6 +259,18 @@ def get_monthly():
         else:
             monthly_server_diff = None
 
+        # 인기도 성장
+        cur_pop = cur.get("popularity") or 0
+        snap_pop = snap.get("popularity") or 0 if snap else 0
+        pop_diff = cur_pop - snap_pop if snap and snap_pop is not None else None
+
+        snap_pop_rank = snap.get("pop_server_rank") if snap else None
+        cur_pop_rank = cur.get("pop_server_rank")
+        if snap_pop_rank and cur_pop_rank:
+            monthly_pop_rank_diff = snap_pop_rank - cur_pop_rank
+        else:
+            monthly_pop_rank_diff = None
+
         result.append({
             "capturedAt": cur.get("captured_at"),
             "guild": cur.get("guild"),
@@ -274,13 +286,17 @@ def get_monthly():
             "serverRankPrev": cur.get("server_rank_prev"),
             "serverRankDiff": cur.get("server_rank_diff"),
             "serverRankDirection": cur.get("server_rank_direction"),
-            "monthlyDiff": monthly_diff,        # 월간 성장량 (숫자, snap 없으면 null)
-            "growthRate": growth_rate,          # 월간 성장률 (%, snap 없으면 null)
-            "snapshotMonth": snapshot_month,    # "2025-04"
-            "monthlyServerDiff": monthly_server_diff,  # 월간 서버 순위 변동
-            "hasSnapshot": snap is not None,    # 스냅샷 존재 여부
+            "monthlyDiff": monthly_diff,
+            "growthRate": growth_rate,
+            "snapshotMonth": snapshot_month,
+            "monthlyServerDiff": monthly_server_diff,
+            "hasSnapshot": snap is not None,
             "isMaster": cur.get("is_master", False),
             "detailUrl": cur.get("detail_url"),
+            "popularity": cur_pop,
+            "popDiff": pop_diff,
+            "popServerRank": cur_pop_rank,
+            "monthlyPopRankDiff": monthly_pop_rank_diff,
         })
 
     # 성장량 기준 정렬 (null은 뒤로)

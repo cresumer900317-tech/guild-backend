@@ -85,6 +85,8 @@ def save_monthly_snapshot(members: list[dict]):
             "power_text": m.get("power_text"),
             "server_rank": m.get("server_rank"),
             "overall_rank": m.get("overall_rank"),
+            "popularity": m.get("popularity"),
+            "pop_server_rank": m.get("pop_server_rank"),
         })
 
     if rows:
