@@ -165,7 +165,7 @@ def get_members():
 def update_pop_rank():
     """
     mgf.gg 스카니아11 인기도 랭킹 페이지를 크롤링해서
-    members 테이블의 pop_server_rank 컬럼을 업데이트.
+    members 테이블의 pop_server_rank 컬럼을 업데이트합니다.
     """
     from fetch_mgf import fetch_popularity_rank
     try:
