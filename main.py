@@ -181,23 +181,29 @@ def update_pop_rank():
         # 인기도 랭킹 크롤링
         rank_map = fetch_popularity_rank(member_names)
 
-        # DB 업데이트: 발견된 멤버만 pop_server_rank 갱신
+        # DB 업데이트: REST API로 직접 pop_server_rank 갱신
+        import httpx, urllib.parse
+        sb_url = os.environ.get("SUPABASE_URL")
+        sb_key = os.environ.get("SUPABASE_SERVICE_KEY")
+        headers = {
+            "apikey": sb_key,
+            "Authorization": f"Bearer {sb_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
         updated = 0
-        for name, pop_rank in rank_map.items():
-            if name in member_names:
-                supabase.table("members")\
-                    .update({"pop_server_rank": pop_rank})\
-                    .eq("name", name)\
-                    .execute()
-                updated += 1
+        with httpx.Client(timeout=10) as client:
+            for name, pop_rank in rank_map.items():
+                if name in member_names:
+                    url = f"{sb_url}/rest/v1/members?name=eq.{urllib.parse.quote(name)}"
+                    client.patch(url, headers=headers, json={"pop_server_rank": pop_rank})
+                    updated += 1
 
-        # 랭킹 미발견 멤버는 pop_server_rank = null 로 초기화
-        not_found = member_names - set(rank_map.keys())
-        for name in not_found:
-            supabase.table("members")\
-                .update({"pop_server_rank": None})\
-                .eq("name", name)\
-                .execute()
+            # 랭킹 미발견 멤버는 pop_server_rank = null 로 초기화
+            not_found = member_names - set(rank_map.keys())
+            for name in not_found:
+                url = f"{sb_url}/rest/v1/members?name=eq.{urllib.parse.quote(name)}"
+                client.patch(url, headers=headers, json={"pop_server_rank": None})
 
         return {
             "status": "ok",
