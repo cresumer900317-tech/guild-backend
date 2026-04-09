@@ -147,7 +147,7 @@ def root():
 @app.get("/api/ranking")
 def get_ranking():
     result = supabase.table("members")\
-        .select("*")\
+        .select("*,pop_server_rank")\
         .order("server_rank")\
         .execute()
     return to_camel(result.data)
@@ -156,7 +156,7 @@ def get_ranking():
 @app.get("/api/members")
 def get_members():
     result = supabase.table("members")\
-        .select("*")\
+        .select("*,pop_server_rank")\
         .execute()
     return to_camel(result.data)
 
@@ -252,12 +252,12 @@ def get_monthly():
     snapshot_month = now.strftime("%Y-%m")
 
     # 현재 멤버 데이터
-    current_result = supabase.table("members").select("*").execute()
+    current_result = supabase.table("members").select("*,pop_server_rank").execute()
     current_members = {m["name"]: m for m in current_result.data}
 
     # 이번 달 월초 스냅샷
     snapshot_result = supabase.table("monthly_snapshots")\
-        .select("*")\
+        .select("*,popularity,pop_server_rank")\
         .eq("snapshot_month", snapshot_month)\
         .execute()
     snapshot_map = {s["name"]: s for s in snapshot_result.data}
@@ -326,7 +326,7 @@ def get_monthly():
 
 @app.get("/api/home-summary")
 def get_home_summary():
-    result = supabase.table("members").select("*").execute()
+    result = supabase.table("members").select("*,pop_server_rank").execute()
     members = result.data
     if not members:
         return {
@@ -391,7 +391,7 @@ def get_rivals():
     now = datetime.now()
 
     # ── 친구들 멤버 (members 테이블에서 친구들만) ──
-    friends_result = supabase.table("members")        .select("*")        .eq("guild", "친구들")        .execute()
+    friends_result = supabase.table("members")        .select("*,pop_server_rank")        .eq("guild", "친구들")        .execute()
     friends_members = sorted(
         friends_result.data or [],
         key=lambda m: m.get("power") or 0,
