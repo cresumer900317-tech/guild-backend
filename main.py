@@ -221,6 +221,22 @@ def get_weekly():
     return to_camel(result.data)
 
 
+@app.post("/api/snapshot-pop-backfill")
+def snapshot_pop_backfill():
+    """이번 달 스냅샷에 현재 인기도 데이터 채우기 (일회용)"""
+    now = datetime.now()
+    snapshot_month = now.strftime("%Y-%m")
+    members = supabase.table("members").select("name,popularity,pop_server_rank").execute()
+    updated = 0
+    for m in members.data or []:
+        supabase.table("monthly_snapshots").update({
+            "popularity": m.get("popularity"),
+            "pop_server_rank": m.get("pop_server_rank"),
+        }).eq("snapshot_month", snapshot_month).eq("name", m["name"]).execute()
+        updated += 1
+    return {"status": "ok", "message": f"{snapshot_month} 스냅샷에 인기도 {updated}명 반영 완료"}
+
+
 @app.get("/api/monthly")
 def get_monthly():
     """
