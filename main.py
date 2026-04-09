@@ -665,6 +665,33 @@ def deactivate_user(req: CharacterRequest, admin: dict = Depends(require_admin))
     return {"status": "ok", "message": f"{req.character_name} 비활성화 완료"}
 
 
+class ResetPasswordRequest(BaseModel):
+    character_name: str
+    new_password: str
+
+@app.post("/api/auth/reset-password")
+def reset_password(req: ResetPasswordRequest, admin: dict = Depends(require_admin)):
+    """비밀번호 리셋 (superadmin 전용)"""
+    if admin["role"] != "superadmin":
+        raise HTTPException(status_code=403, detail="슈퍼어드민만 가능합니다")
+    pw_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
+    supabase.table("users").update({"password_hash": pw_hash}).eq("character_name", req.character_name).execute()
+    return {"status": "ok", "message": f"{req.character_name} 비밀번호 리셋 완료"}
+
+@app.post("/api/auth/init-superadmin")
+def init_superadmin():
+    """슈퍼어드민 비밀번호 초기화 (일회용)"""
+    user = supabase.table("users").select("password_hash").eq("character_name", "친구닷").execute()
+    if not user.data:
+        raise HTTPException(status_code=404, detail="친구닷 계정을 찾을 수 없습니다")
+    # 이미 올바른 비밀번호가 설정되어 있으면 스킵
+    existing = user.data[0].get("password_hash", "")
+    if existing and bcrypt.checkpw(b"wedding260606", existing.encode()):
+        return {"status": "ok", "message": "이미 설정되어 있습니다"}
+    pw_hash = bcrypt.hashpw(b"wedding260606", bcrypt.gensalt()).decode()
+    supabase.table("users").update({"password_hash": pw_hash}).eq("character_name", "친구닷").execute()
+    return {"status": "ok", "message": "친구닷 비밀번호 초기화 완료"}
+
 @app.delete("/api/auth/users/{character_name}")
 def delete_user(character_name: str):
     """유저 삭제"""
