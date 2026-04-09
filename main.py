@@ -226,6 +226,7 @@ def snapshot_pop_backfill():
     """이번 달 스냅샷에 현재 인기도 데이터 채우기 (일회용)"""
     now = datetime.now()
     snapshot_month = now.strftime("%Y-%m")
+
     members = supabase.table("members").select("name,popularity,pop_server_rank").execute()
     updated = 0
     for m in members.data or []:
