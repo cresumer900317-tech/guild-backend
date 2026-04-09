@@ -183,8 +183,8 @@ def update_pop_rank():
 
         # DB 업데이트: REST API로 직접 pop_server_rank 갱신
         import httpx, urllib.parse
-        sb_url = os.environ.get("SUPABASE_URL")
-        sb_key = os.environ.get("SUPABASE_SERVICE_KEY")
+        sb_url = os.environ.get("SUPABASE_URL", "").strip()
+        sb_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
         headers = {
             "apikey": sb_key,
             "Authorization": f"Bearer {sb_key}",
