@@ -318,7 +318,7 @@ def parse_rival_guild(html: str, guild_name: str) -> tuple[dict, list[dict]]:
 POP_RANK_URL = "https://mgf.gg/ranking/pop.php?server=11&recent=1&stx=&page={page}"
 FRIEND_GUILDS = {"친구들", "친구둘", "친구삼", "친구넷", "친구닷"}
 
-def fetch_popularity_rank(member_names: set[str], max_pages: int = 30) -> dict[str, int]:
+def fetch_popularity_rank(member_names: set[str], max_pages: int = 100) -> dict[str, int]:
     """
     mgf.gg 스카니아11 인기도 랭킹 페이지를 순회하며
     친구패밀리 멤버의 서버 인기도 순위를 반환.
@@ -379,7 +379,7 @@ def fetch_popularity_rank(member_names: set[str], max_pages: int = 30) -> dict[s
             empty_streak = 0
         else:
             empty_streak += 1
-            if empty_streak >= 3 and page > 5:
+            if empty_streak >= 10 and page > 10:
                 print(f"[인기도 랭킹] 빈 페이지 {empty_streak}연속 → 종료")
                 break
 
