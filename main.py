@@ -184,23 +184,20 @@ def update_pop_rank():
         # DB 업데이트: 발견된 멤버만 pop_server_rank 갱신
         updated = 0
         for name, pop_rank in rank_map.items():
-            member_id = name_to_id.get(name)
-            if member_id:
+            if name in member_names:
                 supabase.table("members")\
                     .update({"pop_server_rank": pop_rank})\
-                    .eq("id", member_id)\
+                    .eq("name", name)\
                     .execute()
                 updated += 1
 
         # 랭킹 미발견 멤버는 pop_server_rank = null 로 초기화
         not_found = member_names - set(rank_map.keys())
         for name in not_found:
-            member_id = name_to_id.get(name)
-            if member_id:
-                supabase.table("members")\
-                    .update({"pop_server_rank": None})\
-                    .eq("id", member_id)\
-                    .execute()
+            supabase.table("members")\
+                .update({"pop_server_rank": None})\
+                .eq("name", name)\
+                .execute()
 
         return {
             "status": "ok",
