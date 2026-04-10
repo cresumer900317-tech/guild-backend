@@ -144,21 +144,29 @@ def root():
     return {"status": "ok", "message": "친구패밀리 백엔드 작동 중!"}
 
 
+def fetch_members_raw(filters: str = "", order: str = "server_rank"):
+    """Supabase REST API로 members 직접 조회 (스키마 캐시 우회)"""
+    import httpx
+    sb_url = os.environ.get("SUPABASE_URL", "").strip()
+    sb_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    url = f"{sb_url}/rest/v1/members?select=*&order={order}{filters}"
+    resp = httpx.get(url, headers={
+        "apikey": sb_key,
+        "Authorization": f"Bearer {sb_key}",
+    }, timeout=15)
+    return resp.json()
+
+
 @app.get("/api/ranking")
 def get_ranking():
-    result = supabase.table("members")\
-        .select("*,pop_server_rank")\
-        .order("server_rank")\
-        .execute()
-    return to_camel(result.data)
+    data = fetch_members_raw(order="server_rank")
+    return to_camel(data)
 
 
 @app.get("/api/members")
 def get_members():
-    result = supabase.table("members")\
-        .select("*,pop_server_rank")\
-        .execute()
-    return to_camel(result.data)
+    data = fetch_members_raw()
+    return to_camel(data)
 
 
 @app.post("/api/update-pop-rank")
@@ -252,15 +260,19 @@ def get_monthly():
     snapshot_month = now.strftime("%Y-%m")
 
     # 현재 멤버 데이터
-    current_result = supabase.table("members").select("*,pop_server_rank").execute()
-    current_members = {m["name"]: m for m in current_result.data}
+    current_data = fetch_members_raw()
+    current_members = {m["name"]: m for m in current_data}
 
     # 이번 달 월초 스냅샷
-    snapshot_result = supabase.table("monthly_snapshots")\
-        .select("*,popularity,pop_server_rank")\
-        .eq("snapshot_month", snapshot_month)\
-        .execute()
-    snapshot_map = {s["name"]: s for s in snapshot_result.data}
+    import httpx as _httpx
+    _sb_url = os.environ.get("SUPABASE_URL", "").strip()
+    _sb_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    _snap_resp = _httpx.get(
+        f"{_sb_url}/rest/v1/monthly_snapshots?select=*&snapshot_month=eq.{snapshot_month}",
+        headers={"apikey": _sb_key, "Authorization": f"Bearer {_sb_key}"},
+        timeout=15,
+    )
+    snapshot_map = {s["name"]: s for s in _snap_resp.json()}
 
     result = []
     for name, cur in current_members.items():
@@ -326,8 +338,7 @@ def get_monthly():
 
 @app.get("/api/home-summary")
 def get_home_summary():
-    result = supabase.table("members").select("*,pop_server_rank").execute()
-    members = result.data
+    members = fetch_members_raw()
     if not members:
         return {
             "guild_name": "친구패밀리",
@@ -391,9 +402,9 @@ def get_rivals():
     now = datetime.now()
 
     # ── 친구들 멤버 (members 테이블에서 친구들만) ──
-    friends_result = supabase.table("members")        .select("*,pop_server_rank")        .eq("guild", "친구들")        .execute()
+    friends_data = fetch_members_raw(filters="&guild=eq.친구들")
     friends_members = sorted(
-        friends_result.data or [],
+        friends_data or [],
         key=lambda m: m.get("power") or 0,
         reverse=True
     )
