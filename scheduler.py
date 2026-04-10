@@ -110,9 +110,16 @@ def run_crawl():
         # snake_case 변환
         members = to_snake(members_camel)
 
+        # 기존 pop_server_rank 보존
+        existing = supabase.table("members").select("name,pop_server_rank").execute()
+        pop_map = {m["name"]: m.get("pop_server_rank") for m in (existing.data or []) if m.get("pop_server_rank") is not None}
+
         # 기존 데이터 삭제 후 새로 저장
         supabase.table("members").delete().neq("id", 0).execute()
         if members:
+            for m in members:
+                if m.get("name") in pop_map:
+                    m["pop_server_rank"] = pop_map[m["name"]]
             supabase.table("members").insert(members).execute()
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
