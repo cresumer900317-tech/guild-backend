@@ -791,7 +791,7 @@ def create_tip(req: TipCreate):
         raise HTTPException(status_code=400, detail="로그인이 필요합니다")
     result = supabase.table("tips").insert({
         "title": title, "content": content, "category": req.category,
-        "author": req.author, "author_guild": req.author_guild, "likes": 0,
+        "author": req.author, "author_guild": req.author_guild, "likes": 0, "views": 0,
     }).execute()
     return result.data[0] if result.data else {}
 
@@ -803,6 +803,15 @@ def like_tip(tip_id: int):
     current = result.data[0]["likes"] or 0
     supabase.table("tips").update({"likes": current + 1}).eq("id", tip_id).execute()
     return {"likes": current + 1}
+
+@app.post("/api/tips/{tip_id}/view")
+def view_tip(tip_id: int):
+    result = supabase.table("tips").select("views").eq("id", tip_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    current = result.data[0].get("views") or 0
+    supabase.table("tips").update({"views": current + 1}).eq("id", tip_id).execute()
+    return {"views": current + 1}
 
 @app.delete("/api/tips/{tip_id}")
 def delete_tip(tip_id: int):
