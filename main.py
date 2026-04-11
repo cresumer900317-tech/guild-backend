@@ -795,6 +795,23 @@ def create_tip(req: TipCreate):
     }).execute()
     return result.data[0] if result.data else {}
 
+@app.get("/api/tips/{tip_id}")
+def get_tip(tip_id: int):
+    result = supabase.table("tips").select("*").eq("id", tip_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    return result.data[0]
+
+@app.get("/api/tips/{tip_id}/adjacent")
+def get_adjacent_tips(tip_id: int):
+    """현재 글의 이전/다음 글 (id, title만 반환)"""
+    prev_result = supabase.table("tips").select("id,title").lt("id", tip_id).order("id", desc=True).limit(1).execute()
+    next_result = supabase.table("tips").select("id,title").gt("id", tip_id).order("id", desc=False).limit(1).execute()
+    return {
+        "prev": prev_result.data[0] if prev_result.data else None,
+        "next": next_result.data[0] if next_result.data else None,
+    }
+
 @app.post("/api/tips/{tip_id}/like")
 def like_tip(tip_id: int):
     result = supabase.table("tips").select("likes").eq("id", tip_id).execute()
