@@ -4,6 +4,7 @@ import os
 import jwt
 from pydantic import BaseModel, field_validator
 from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
 from database import supabase
@@ -902,3 +903,66 @@ def get_visitor_stats():
             {"name": r["character_name"]} for r in online_list
         ],
     }
+
+
+# ── 매크로 인증 / 다운로드 API ───────────────────────────────
+
+MACRO_DIR = os.path.join(os.path.dirname(__file__), "macro_files")
+
+@app.get("/api/macro/verify")
+def verify_macro_token(user: dict = Depends(get_current_user)):
+    """매크로 클라이언트용 토큰 검증 — 활성 길드원만 통과"""
+    result = supabase.table("users") \
+        .select("status, guild") \
+        .eq("character_name", user["character_name"]) \
+        .execute()
+    if not result.data or result.data[0]["status"] != "active":
+        raise HTTPException(status_code=403, detail="비활성 계정입니다")
+    return {
+        "status": "ok",
+        "character_name": user["character_name"],
+        "guild": result.data[0].get("guild", ""),
+        "role": user["role"],
+    }
+
+@app.post("/api/macro/login")
+def macro_login(req: AuthRequest):
+    """매크로 전용 로그인 — 로그인 + 활성 길드원 검증을 한번에"""
+    result = supabase.table("users") \
+        .select("*") \
+        .eq("character_name", req.character_name) \
+        .execute()
+    if not result.data:
+        raise HTTPException(status_code=401, detail="캐릭터명 또는 비밀번호가 틀렸습니다")
+    user = result.data[0]
+    if user["status"] != "active":
+        raise HTTPException(status_code=403, detail="승인되지 않았거나 비활성 계정입니다")
+    if not bcrypt.checkpw(req.password.encode(), user["password_hash"].encode()):
+        raise HTTPException(status_code=401, detail="캐릭터명 또는 비밀번호가 틀렸습니다")
+    token = create_access_token(user["character_name"], user["role"])
+    return {
+        "status": "ok",
+        "token": token,
+        "character_name": user["character_name"],
+        "guild": user.get("guild", ""),
+    }
+
+@app.get("/api/macro/download")
+def download_macro(user: dict = Depends(get_current_user)):
+    """인증된 길드원만 매크로 파일 다운로드 가능"""
+    # 활성 유저 확인
+    result = supabase.table("users") \
+        .select("status") \
+        .eq("character_name", user["character_name"]) \
+        .execute()
+    if not result.data or result.data[0]["status"] != "active":
+        raise HTTPException(status_code=403, detail="비활성 계정입니다")
+
+    macro_path = os.path.join(MACRO_DIR, "ZakumMacro.zip")
+    if not os.path.isfile(macro_path):
+        raise HTTPException(status_code=404, detail="매크로 파일이 아직 업로드되지 않았습니다")
+    return FileResponse(
+        macro_path,
+        media_type="application/zip",
+        filename="ZakumMacro.zip",
+    )
