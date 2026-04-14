@@ -51,6 +51,8 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
 class AuthRequest(BaseModel):
     character_name: str
     password: str
+    email: Optional[str] = None
+    birthdate: Optional[str] = None  # YYYY-MM-DD
 
     @field_validator("character_name", "password", mode="before")
     @classmethod
@@ -632,13 +634,19 @@ def register(req: AuthRequest):
     # 비밀번호 해시
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-    supabase.table("users").insert({
+    user_data = {
         "character_name": character_name,
         "password_hash": pw_hash,
         "guild": member.get("guild", ""),
         "status": "pending",
         "role": "member",
-    }).execute()
+    }
+    if req.email:
+        user_data["email"] = req.email.strip()
+    if req.birthdate:
+        user_data["birthdate"] = req.birthdate.strip()
+
+    supabase.table("users").insert(user_data).execute()
 
     return {"status": "ok", "message": "가입 신청이 완료됐습니다. 운영진 승인 후 이용 가능합니다"}
 
@@ -756,32 +764,78 @@ def change_password(req: ChangePasswordRequest, user: dict = Depends(get_current
         "character_name", user["character_name"]).execute()
     return {"status": "ok", "message": "비밀번호가 변경되었습니다"}
 
-@app.post("/api/auth/reset-request")
-def reset_request(req: CharacterRequest):
-    """비밀번호 초기화 요청 (누구나 가능, 관리자가 처리)"""
-    # 계정 존재 확인
-    result = supabase.table("users").select("character_name, status").eq(
-        "character_name", req.character_name).execute()
+class RecoverPasswordRequest(BaseModel):
+    character_name: str
+    email: str
+    birthdate: str  # YYYY-MM-DD
+    new_password: str
+
+@app.post("/api/auth/recover-password")
+def recover_password(req: RecoverPasswordRequest):
+    """비밀번호 찾기 — 이메일 + 생년월일 확인 후 새 비밀번호 설정"""
+    if len(req.new_password) < 4:
+        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
+
+    result = supabase.table("users").select(
+        "character_name, email, birthdate"
+    ).eq("character_name", req.character_name.strip()).execute()
+
     if not result.data:
         raise HTTPException(status_code=404, detail="등록되지 않은 캐릭터명입니다")
 
-    # password_reset_requested 플래그 설정
-    try:
-        supabase.table("users").update({
-            "password_reset_requested": True
-        }).eq("character_name", req.character_name).execute()
-    except Exception:
-        pass  # 컬럼이 없어도 요청은 성공으로 처리
-    return {"status": "ok", "message": "초기화 요청이 접수되었습니다"}
+    user = result.data[0]
+    stored_email = (user.get("email") or "").strip().lower()
+    stored_birth = (user.get("birthdate") or "").strip()
+
+    if not stored_email or not stored_birth:
+        raise HTTPException(status_code=400,
+            detail="이메일/생년월일이 등록되지 않은 계정입니다. 관리자에게 문의해주세요")
+
+    if req.email.strip().lower() != stored_email or req.birthdate.strip() != stored_birth:
+        raise HTTPException(status_code=400, detail="이메일 또는 생년월일이 일치하지 않습니다")
+
+    pw_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
+    supabase.table("users").update({"password_hash": pw_hash}).eq(
+        "character_name", req.character_name.strip()).execute()
+    return {"status": "ok", "message": "비밀번호가 재설정되었습니다. 새 비밀번호로 로그인해주세요"}
 
 
-@app.get("/api/auth/reset-requests")
-def get_reset_requests(admin: dict = Depends(require_admin)):
-    """비밀번호 초기화 요청 목록 (관리자용)"""
+class UpdateProfileRequest(BaseModel):
+    email: Optional[str] = None
+    birthdate: Optional[str] = None  # YYYY-MM-DD
+
+@app.post("/api/auth/update-profile")
+def update_profile(req: UpdateProfileRequest, user: dict = Depends(get_current_user)):
+    """회원정보 변경 (이메일, 생년월일)"""
+    updates = {}
+    if req.email is not None:
+        email = req.email.strip()
+        if not email:
+            raise HTTPException(status_code=400, detail="이메일을 입력해주세요")
+        updates["email"] = email
+    if req.birthdate is not None:
+        birthdate = req.birthdate.strip()
+        if not birthdate:
+            raise HTTPException(status_code=400, detail="생년월일을 입력해주세요")
+        updates["birthdate"] = birthdate
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="변경할 항목이 없습니다")
+
+    supabase.table("users").update(updates).eq(
+        "character_name", user["character_name"]).execute()
+    return {"status": "ok", "message": "회원정보가 변경되었습니다"}
+
+
+@app.get("/api/auth/profile")
+def get_profile(user: dict = Depends(get_current_user)):
+    """내 회원정보 조회"""
     result = supabase.table("users").select(
-        "character_name, guild, created_at"
-    ).eq("password_reset_requested", True).execute()
-    return result.data or []
+        "character_name, guild, role, email, birthdate"
+    ).eq("character_name", user["character_name"]).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다")
+    return result.data[0]
 
 
 @app.post("/api/auth/init-superadmin")
