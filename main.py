@@ -144,7 +144,7 @@ app.add_middleware(
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "친구패밀리 백엔드 작동 중!"}
+    return {"status": "ok", "message": "친구패밀리 백엔드 작동 중!", "version": "2026-04-15-v3"}
 
 
 def fetch_members_raw(filters: str = "", order: str = "server_rank"):
@@ -730,11 +730,14 @@ def reset_password(req: ResetPasswordRequest, admin: dict = Depends(require_admi
     """비밀번호 리셋 (관리자용)"""
     if len(req.new_password) < 4:
         raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
-    pw_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
-    supabase.table("users").update({
-        "password_hash": pw_hash,
-    }).eq("character_name", req.character_name).execute()
-    return {"status": "ok", "message": f"{req.character_name} 비밀번호 리셋 완료"}
+    try:
+        pw_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
+        supabase.table("users").update({
+            "password_hash": pw_hash,
+        }).eq("character_name", req.character_name).execute()
+        return {"status": "ok", "message": f"{req.character_name} 비밀번호 리셋 완료"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"리셋 실패: {str(e)}")
 
 
 class ChangePasswordRequest(BaseModel):
