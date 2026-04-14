@@ -719,12 +719,70 @@ class ResetPasswordRequest(BaseModel):
 
 @app.post("/api/auth/reset-password")
 def reset_password(req: ResetPasswordRequest, admin: dict = Depends(require_admin)):
-    """비밀번호 리셋 (superadmin 전용)"""
-    if admin["role"] != "superadmin":
-        raise HTTPException(status_code=403, detail="슈퍼어드민만 가능합니다")
+    """비밀번호 리셋 (관리자용)"""
+    if len(req.new_password) < 4:
+        raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
     pw_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
-    supabase.table("users").update({"password_hash": pw_hash}).eq("character_name", req.character_name).execute()
+    supabase.table("users").update({
+        "password_hash": pw_hash,
+        "password_reset_requested": False,
+    }).eq("character_name", req.character_name).execute()
     return {"status": "ok", "message": f"{req.character_name} 비밀번호 리셋 완료"}
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+@app.post("/api/auth/change-password")
+def change_password(req: ChangePasswordRequest, user: dict = Depends(get_current_user)):
+    """본인 비밀번호 변경 (로그인 필요)"""
+    if len(req.new_password) < 4:
+        raise HTTPException(status_code=400, detail="새 비밀번호는 4자 이상이어야 합니다")
+
+    # 현재 비밀번호 확인
+    result = supabase.table("users").select("password_hash").eq(
+        "character_name", user["character_name"]).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다")
+
+    stored_hash = result.data[0]["password_hash"]
+    if not bcrypt.checkpw(req.current_password.encode(), stored_hash.encode()):
+        raise HTTPException(status_code=400, detail="현재 비밀번호가 일치하지 않습니다")
+
+    # 새 비밀번호 저장
+    new_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
+    supabase.table("users").update({"password_hash": new_hash}).eq(
+        "character_name", user["character_name"]).execute()
+    return {"status": "ok", "message": "비밀번호가 변경되었습니다"}
+
+@app.post("/api/auth/reset-request")
+def reset_request(req: CharacterRequest):
+    """비밀번호 초기화 요청 (누구나 가능, 관리자가 처리)"""
+    # 계정 존재 확인
+    result = supabase.table("users").select("character_name, status").eq(
+        "character_name", req.character_name).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="등록되지 않은 캐릭터명입니다")
+
+    # password_reset_requested 플래그 설정
+    try:
+        supabase.table("users").update({
+            "password_reset_requested": True
+        }).eq("character_name", req.character_name).execute()
+    except Exception:
+        pass  # 컬럼이 없어도 요청은 성공으로 처리
+    return {"status": "ok", "message": "초기화 요청이 접수되었습니다"}
+
+
+@app.get("/api/auth/reset-requests")
+def get_reset_requests(admin: dict = Depends(require_admin)):
+    """비밀번호 초기화 요청 목록 (관리자용)"""
+    result = supabase.table("users").select(
+        "character_name, guild, created_at"
+    ).eq("password_reset_requested", True).execute()
+    return result.data or []
+
 
 @app.post("/api/auth/init-superadmin")
 def init_superadmin():
