@@ -612,6 +612,10 @@ def register(req: AuthRequest):
         raise HTTPException(status_code=400, detail="캐릭터명과 비밀번호를 입력해주세요")
     if len(password) < 4:
         raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
+    if not req.email or not req.email.strip():
+        raise HTTPException(status_code=400, detail="이메일을 입력해주세요")
+    if not req.birthdate or not req.birthdate.strip():
+        raise HTTPException(status_code=400, detail="생년월일을 입력해주세요")
 
     # 캐릭터명이 실제 길드원인지 확인
     member_result = supabase.table("members")        .select("name, guild")        .eq("name", character_name)        .execute()
