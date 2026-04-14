@@ -733,7 +733,6 @@ def reset_password(req: ResetPasswordRequest, admin: dict = Depends(require_admi
     pw_hash = bcrypt.hashpw(req.new_password.encode(), bcrypt.gensalt()).decode()
     supabase.table("users").update({
         "password_hash": pw_hash,
-        "password_reset_requested": False,
     }).eq("character_name", req.character_name).execute()
     return {"status": "ok", "message": f"{req.character_name} 비밀번호 리셋 완료"}
 
