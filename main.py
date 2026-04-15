@@ -85,6 +85,11 @@ class TipCreate(BaseModel):
     author: str = ""
     author_guild: str = ""
 
+class MacroCommentCreate(BaseModel):
+    content: str
+    author: str = ""
+    author_guild: str = ""
+
 class ContributionUpsert(BaseModel):
     month: str
     guild_name: str
@@ -1084,3 +1089,35 @@ def download_macro(user: dict = Depends(get_current_user)):
         media_type="application/zip",
         filename="ZakumMacro.zip",
     )
+
+# ── 매크로 피드백 댓글 ──────────────────────────────────
+@app.get("/api/macro/comments")
+def get_macro_comments():
+    result = supabase.table("macro_comments") \
+        .select("*").order("created_at", desc=True).execute()
+    return result.data or []
+
+@app.post("/api/macro/comments")
+def create_macro_comment(req: MacroCommentCreate, user: dict = Depends(get_current_user)):
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="내용을 입력해주세요")
+    if len(content) > 500:
+        raise HTTPException(status_code=400, detail="500자 이내로 작성해주세요")
+    result = supabase.table("macro_comments").insert({
+        "content": content,
+        "author": user["character_name"],
+        "author_guild": req.author_guild,
+    }).execute()
+    return result.data[0] if result.data else {}
+
+@app.delete("/api/macro/comments/{comment_id}")
+def delete_macro_comment(comment_id: int, user: dict = Depends(get_current_user)):
+    # 본인 댓글이거나 admin만 삭제 가능
+    comment = supabase.table("macro_comments").select("author").eq("id", comment_id).execute()
+    if not comment.data:
+        raise HTTPException(status_code=404, detail="없는 댓글")
+    if comment.data[0]["author"] != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
+    supabase.table("macro_comments").delete().eq("id", comment_id).execute()
+    return {"status": "ok"}
