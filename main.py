@@ -94,6 +94,7 @@ class TipCommentCreate(BaseModel):
     content: str
     author: str = ""
     author_guild: str = ""
+    parent_id: int | None = None
 
 class TipCommentUpdate(BaseModel):
     content: str
@@ -1144,12 +1145,15 @@ def create_tip_comment(tip_id: int, req: TipCommentCreate, user: dict = Depends(
         raise HTTPException(status_code=400, detail="내용을 입력해주세요")
     if len(content) > 500:
         raise HTTPException(status_code=400, detail="500자 이내로 작성해주세요")
-    result = supabase.table("tip_comments").insert({
+    row = {
         "tip_id": tip_id,
         "content": content,
         "author": user["character_name"],
         "author_guild": req.author_guild,
-    }).execute()
+    }
+    if req.parent_id is not None:
+        row["parent_id"] = req.parent_id
+    result = supabase.table("tip_comments").insert(row).execute()
     return result.data[0] if result.data else {}
 
 @app.patch("/api/tips/comments/{comment_id}")
