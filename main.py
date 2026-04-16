@@ -95,6 +95,9 @@ class TipCommentCreate(BaseModel):
     author: str = ""
     author_guild: str = ""
 
+class TipCommentUpdate(BaseModel):
+    content: str
+
 class ContributionUpsert(BaseModel):
     month: str
     guild_name: str
@@ -1147,6 +1150,21 @@ def create_tip_comment(tip_id: int, req: TipCommentCreate, user: dict = Depends(
         "author": user["character_name"],
         "author_guild": req.author_guild,
     }).execute()
+    return result.data[0] if result.data else {}
+
+@app.patch("/api/tips/comments/{comment_id}")
+def update_tip_comment(comment_id: int, req: TipCommentUpdate, user: dict = Depends(get_current_user)):
+    comment = supabase.table("tip_comments").select("author").eq("id", comment_id).execute()
+    if not comment.data:
+        raise HTTPException(status_code=404, detail="없는 댓글")
+    if comment.data[0]["author"] != user["character_name"]:
+        raise HTTPException(status_code=403, detail="본인 댓글만 수정할 수 있습니다")
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="내용을 입력해주세요")
+    if len(content) > 500:
+        raise HTTPException(status_code=400, detail="500자 이내로 작성해주세요")
+    result = supabase.table("tip_comments").update({"content": content}).eq("id", comment_id).execute()
     return result.data[0] if result.data else {}
 
 @app.delete("/api/tips/comments/{comment_id}")
