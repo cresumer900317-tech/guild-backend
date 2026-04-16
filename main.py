@@ -90,6 +90,11 @@ class MacroCommentCreate(BaseModel):
     author: str = ""
     author_guild: str = ""
 
+class TipCommentCreate(BaseModel):
+    content: str
+    author: str = ""
+    author_guild: str = ""
+
 class ContributionUpsert(BaseModel):
     month: str
     guild_name: str
@@ -1120,4 +1125,36 @@ def delete_macro_comment(comment_id: int, user: dict = Depends(get_current_user)
     if comment.data[0]["author"] != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
         raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
     supabase.table("macro_comments").delete().eq("id", comment_id).execute()
+    return {"status": "ok"}
+
+# ── 팁 게시판 댓글 ──────────────────────────────────
+@app.get("/api/tips/{tip_id}/comments")
+def get_tip_comments(tip_id: int):
+    result = supabase.table("tip_comments") \
+        .select("*").eq("tip_id", tip_id).order("created_at", desc=False).execute()
+    return result.data or []
+
+@app.post("/api/tips/{tip_id}/comments")
+def create_tip_comment(tip_id: int, req: TipCommentCreate, user: dict = Depends(get_current_user)):
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="내용을 입력해주세요")
+    if len(content) > 500:
+        raise HTTPException(status_code=400, detail="500자 이내로 작성해주세요")
+    result = supabase.table("tip_comments").insert({
+        "tip_id": tip_id,
+        "content": content,
+        "author": user["character_name"],
+        "author_guild": req.author_guild,
+    }).execute()
+    return result.data[0] if result.data else {}
+
+@app.delete("/api/tips/comments/{comment_id}")
+def delete_tip_comment(comment_id: int, user: dict = Depends(get_current_user)):
+    comment = supabase.table("tip_comments").select("author").eq("id", comment_id).execute()
+    if not comment.data:
+        raise HTTPException(status_code=404, detail="없는 댓글")
+    if comment.data[0]["author"] != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
+    supabase.table("tip_comments").delete().eq("id", comment_id).execute()
     return {"status": "ok"}
