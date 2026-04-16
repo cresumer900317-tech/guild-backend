@@ -969,6 +969,74 @@ def delete_tip(tip_id: int):
     return {"status": "ok"}
 
 
+# ── 자유게시판 API ──────────────────────────────────────────────
+
+@app.get("/api/free")
+def get_free_posts():
+    result = supabase.table("free_posts").select("*").order("created_at", desc=True).execute()
+    return result.data or []
+
+@app.get("/api/free/{post_id}")
+def get_free_post(post_id: int):
+    result = supabase.table("free_posts").select("*").eq("id", post_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    return result.data[0]
+
+@app.get("/api/free/{post_id}/adjacent")
+def get_free_adjacent(post_id: int):
+    current = supabase.table("free_posts").select("created_at").eq("id", post_id).execute()
+    if not current.data:
+        return {"prev": None, "next": None}
+    created = current.data[0]["created_at"]
+    prev_result = supabase.table("free_posts").select("id,title").lt("created_at", created).order("created_at", desc=True).limit(1).execute()
+    next_result = supabase.table("free_posts").select("id,title").gt("created_at", created).order("created_at").limit(1).execute()
+    return {
+        "prev": prev_result.data[0] if prev_result.data else None,
+        "next": next_result.data[0] if next_result.data else None,
+    }
+
+@app.post("/api/free/{post_id}/view")
+def view_free_post(post_id: int):
+    result = supabase.table("free_posts").select("views").eq("id", post_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    current = result.data[0]["views"] or 0
+    supabase.table("free_posts").update({"views": current + 1}).eq("id", post_id).execute()
+    return {"views": current + 1}
+
+@app.post("/api/free")
+def create_free_post(payload: dict):
+    title = (payload.get("title") or "").strip()
+    content = (payload.get("content") or "").strip()
+    author = payload.get("author", "")
+    author_guild = payload.get("author_guild", "")
+    if not title or not content:
+        raise HTTPException(status_code=400, detail="제목과 내용을 입력해주세요")
+    if not author:
+        raise HTTPException(status_code=400, detail="로그인이 필요합니다")
+    result = supabase.table("free_posts").insert({
+        "title": title, "content": content,
+        "author": author, "author_guild": author_guild,
+        "likes": 0, "views": 0,
+    }).execute()
+    return result.data[0] if result.data else {}
+
+@app.post("/api/free/{post_id}/like")
+def like_free_post(post_id: int):
+    result = supabase.table("free_posts").select("likes").eq("id", post_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    current = result.data[0]["likes"] or 0
+    supabase.table("free_posts").update({"likes": current + 1}).eq("id", post_id).execute()
+    return {"likes": current + 1}
+
+@app.delete("/api/free/{post_id}")
+def delete_free_post(post_id: int):
+    supabase.table("free_posts").delete().eq("id", post_id).execute()
+    return {"status": "ok"}
+
+
 @app.post("/api/auth/role")
 def change_role(req: RoleChangeRequest, admin: dict = Depends(require_admin)):
     """role 변경 (superadmin 전용)"""
