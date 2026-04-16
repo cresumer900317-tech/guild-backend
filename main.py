@@ -969,6 +969,38 @@ def delete_tip(tip_id: int):
     return {"status": "ok"}
 
 
+# ── 임시 길드원 등록 API ─────────────────────────────────────────
+
+class TempMemberCreate(BaseModel):
+    name: str
+    guild: str
+
+@app.post("/api/members/temp")
+def add_temp_member(req: TempMemberCreate, admin: dict = Depends(require_admin)):
+    """관리자가 임시 길드원을 members 테이블에 등록 (회원가입 가능하도록)"""
+    name = req.name.strip()
+    guild = req.guild.strip()
+    if not name or not guild:
+        raise HTTPException(status_code=400, detail="캐릭터명과 길드를 입력해주세요")
+
+    # 이미 존재하는지 확인
+    existing = supabase.table("members").select("name").eq("name", name).execute()
+    if existing.data:
+        raise HTTPException(status_code=409, detail=f"{name}은(는) 이미 등록된 길드원입니다")
+
+    supabase.table("members").insert({
+        "name": name,
+        "guild": guild,
+        "power": 0,
+        "level": 0,
+        "job": "",
+        "power_text": "",
+        "captured_at": datetime.now().isoformat(),
+    }).execute()
+
+    return {"status": "ok", "message": f"{name} 임시 등록 완료 (길드: {guild})"}
+
+
 # ── 자유게시판 API ──────────────────────────────────────────────
 
 @app.get("/api/free")
