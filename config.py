@@ -27,6 +27,11 @@ TARGET_GUILD_URLS = {
 
 MAX_MEMBERS_PER_GUILD = 30
 
+# 길드 목록에서 누락되더라도 반드시 수집할 멤버 (개별 캐릭터 페이지에서 직접 수집)
+FORCE_INCLUDE_MEMBERS = {
+    "임차돌",
+}
+
 EXCLUDED_MEMBER_NAMES = {
     "9966",
     "칭구들",

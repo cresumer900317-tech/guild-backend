@@ -16,6 +16,7 @@ from config import (
     USER_AGENT,
     MAX_MEMBERS_PER_GUILD,
     EXCLUDED_MEMBER_NAMES,
+    FORCE_INCLUDE_MEMBERS,
     LATEST_SNAPSHOT_PATH,
     PREVIOUS_SNAPSHOT_PATH,
 )
@@ -258,6 +259,53 @@ def fetch_mgf_data():
     # 누락 멤버 보완
     recovered = recover_missing_members(all_members, guild_levels)
     all_members.extend(recovered)
+
+    # 강제 포함 멤버 수집
+    current_names = {m["name"] for m in all_members}
+    for force_name in FORCE_INCLUDE_MEMBERS:
+        if force_name in current_names or force_name in EXCLUDED_MEMBER_NAMES:
+            continue
+        guild = verify_member_guild(force_name)
+        if guild and guild in TARGET_GUILD_URLS:
+            print(f"[강제 수집] {force_name} → {guild}")
+            detail_url = f"https://mgf.gg/contents/character.php?n={requests.utils.quote(force_name)}"
+            html = fetch_page(detail_url, retries=2)
+            soup = BeautifulSoup(html, "html.parser")
+            page_text = soup.get_text("\n", strip=True)
+            # 전투력 파싱
+            power_text = ""
+            power = 0
+            power_el = soup.select_one(".power-tooltip") or soup.select_one(".power-text")
+            if power_el:
+                power_text = power_el.get_text(" ", strip=True)
+                power = convert_korean_power_to_int(power_text)
+            # 레벨/직업
+            level = 0
+            job = "미확인"
+            lv_match = re.search(r"Lv\.?\s*(\d+)", page_text)
+            if lv_match:
+                level = int(lv_match.group(1))
+            detail = parse_detail_page(detail_url)
+            time.sleep(DETAIL_REQUEST_DELAY_SECONDS)
+            all_members.append({
+                "capturedAt": datetime.now().isoformat(timespec="seconds"),
+                "guild": guild,
+                "guild_level": guild_levels.get(guild, 0),
+                "guildRank": 99,
+                "name": force_name,
+                "job": job,
+                "level": level,
+                "power": power,
+                "power_text": power_text,
+                "detail_url": detail_url,
+                "image": "",
+                "is_master": False,
+                "overall_rank": detail["overall_rank"],
+                "server_rank": detail["server_rank"],
+                "popularity": detail["popularity"],
+            })
+        else:
+            print(f"[강제 수집] {force_name}: 우리 길드 아님 ({guild})")
 
     print(f"총 수집 인원: {len(all_members)}명")
     return all_members
