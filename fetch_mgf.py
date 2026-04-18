@@ -171,16 +171,23 @@ def parse_members_from_html(html: str, guild_name: str, guild_level: int = 0):
     members = sorted(members, key=lambda x: x.get("guildRank", 9999))
     return members[:MAX_MEMBERS_PER_GUILD]
 
+def clean_guild_name(text: str) -> str:
+    """길드명에서 이모지, 특수문자 제거하고 순수 텍스트만 반환."""
+    cleaned = re.sub(r"[^\w가-힣a-zA-Z0-9]", "", text).strip()
+    return cleaned
+
 def verify_member_guild(name: str) -> str | None:
     """개별 캐릭터 페이지에서 현재 길드명을 확인. 실패 시 None 반환."""
     url = f"https://mgf.gg/contents/character.php?n={requests.utils.quote(name)}"
     try:
         html = fetch_page(url, retries=2)
         soup = BeautifulSoup(html, "html.parser")
-        # 길드 링크에서 길드명 추출
-        guild_link = soup.select_one("a[href*='guild_info.php']")
-        if guild_link:
-            return guild_link.get_text(strip=True)
+        guild_links = soup.select("a[href*='guild_info.php']")
+        for link in guild_links:
+            raw = link.get_text(strip=True)
+            cleaned = clean_guild_name(raw)
+            if cleaned:
+                return cleaned
         return None
     except Exception:
         return None
