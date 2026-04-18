@@ -170,19 +170,95 @@ def parse_members_from_html(html: str, guild_name: str, guild_level: int = 0):
     members = sorted(members, key=lambda x: x.get("guildRank", 9999))
     return members[:MAX_MEMBERS_PER_GUILD]
 
+def verify_member_guild(name: str) -> str | None:
+    """개별 캐릭터 페이지에서 현재 길드명을 확인. 실패 시 None 반환."""
+    url = f"https://mgf.gg/contents/character.php?n={requests.utils.quote(name)}"
+    try:
+        html = fetch_page(url, retries=2)
+        soup = BeautifulSoup(html, "html.parser")
+        # 길드 링크에서 길드명 추출
+        guild_link = soup.select_one("a[href*='guild_info.php']")
+        if guild_link:
+            return guild_link.get_text(strip=True)
+        return None
+    except Exception:
+        return None
+
+def recover_missing_members(current_members: list[dict], guild_levels: dict[str, int]):
+    """이전 스냅샷에 있었지만 이번 수집에서 누락된 멤버를 개별 확인 후 복구."""
+    prev_snapshot = load_snapshot(PREVIOUS_SNAPSHOT_PATH)
+    if not prev_snapshot:
+        prev_snapshot = load_snapshot(LATEST_SNAPSHOT_PATH)
+    prev_rows = prev_snapshot.get("rows", []) if isinstance(prev_snapshot, dict) else []
+    if not prev_rows:
+        return []
+
+    current_names = {m["name"] for m in current_members}
+    prev_map = {row["name"]: row for row in prev_rows if row.get("name")}
+    missing = [row for name, row in prev_map.items()
+               if name not in current_names
+               and name not in EXCLUDED_MEMBER_NAMES
+               and row.get("guild") in TARGET_GUILD_URLS]
+
+    if not missing:
+        return []
+
+    print(f"[보완 수집] 이전 대비 누락 {len(missing)}명 감지 → 개별 확인 시작")
+    recovered = []
+    for prev_row in missing:
+        name = prev_row["name"]
+        expected_guild = prev_row.get("guild", "")
+        actual_guild = verify_member_guild(name)
+        time.sleep(DETAIL_REQUEST_DELAY_SECONDS)
+
+        if actual_guild and actual_guild in TARGET_GUILD_URLS:
+            print(f"  [복구] {name}: {expected_guild} → {actual_guild} (유지)")
+            detail_url = f"https://mgf.gg/contents/character.php?n={requests.utils.quote(name)}"
+            detail = parse_detail_page(detail_url)
+            time.sleep(DETAIL_REQUEST_DELAY_SECONDS)
+            recovered.append({
+                "capturedAt": datetime.now().isoformat(timespec="seconds"),
+                "guild": actual_guild,
+                "guild_level": guild_levels.get(actual_guild, prev_row.get("guild_level", 0)),
+                "guildRank": prev_row.get("guildRank", 99),
+                "name": name,
+                "job": prev_row.get("job", "미확인"),
+                "level": prev_row.get("level", 0),
+                "power": prev_row.get("power", 0),
+                "power_text": prev_row.get("power_text", ""),
+                "detail_url": detail_url,
+                "image": "",
+                "is_master": prev_row.get("is_master", False),
+                "overall_rank": detail["overall_rank"],
+                "server_rank": detail["server_rank"],
+                "popularity": detail["popularity"],
+            })
+        else:
+            print(f"  [제거] {name}: 길드 변경 또는 탈퇴 ({actual_guild})")
+
+    print(f"[보완 수집] 복구 {len(recovered)}명")
+    return recovered
+
 def fetch_mgf_data():
     print("=== MGF 길드 수집 시작 ===")
     all_members = []
+    guild_levels = {}
     for guild_name, url in TARGET_GUILD_URLS.items():
         print(f"수집 중: {guild_name}")
         html = fetch_page(url, retries=1)
         save_debug_html(guild_name, html)
         guild_level = parse_guild_level(html)
+        guild_levels[guild_name] = guild_level
         print(f" -> 길드 레벨: {guild_level}")
         members = parse_members_from_html(html, guild_name, guild_level)
         print(f" -> {len(members)}명")
         all_members.extend(members)
         time.sleep(REQUEST_DELAY_SECONDS)
+
+    # 누락 멤버 보완
+    recovered = recover_missing_members(all_members, guild_levels)
+    all_members.extend(recovered)
+
     print(f"총 수집 인원: {len(all_members)}명")
     return all_members
 
