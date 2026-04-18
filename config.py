@@ -31,6 +31,8 @@ MAX_MEMBERS_PER_GUILD = 30
 FORCE_INCLUDE_MEMBERS = {
     "임차돌",
     "갓친",
+    "마캐",
+    "뼝규",
 }
 
 EXCLUDED_MEMBER_NAMES = {
