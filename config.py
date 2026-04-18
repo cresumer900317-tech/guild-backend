@@ -33,6 +33,7 @@ FORCE_INCLUDE_MEMBERS = {
     "갓친",
     "마캐",
     "뼝규",
+    "악용자",
 }
 
 EXCLUDED_MEMBER_NAMES = {
