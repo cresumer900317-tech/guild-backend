@@ -1280,3 +1280,222 @@ def delete_tip_comment(comment_id: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
     supabase.table("tip_comments").delete().eq("id", comment_id).execute()
     return {"status": "ok"}
+
+
+# ── 개인 업무 관리 (Personal Task Manager) ─────────────────────
+# single-user: 로그인한 본인 데이터만 owner=character_name 으로 조회/수정
+
+ALLOWED_TASK_STATUS = {"todo", "in_progress", "waiting", "done"}
+ALLOWED_TASK_PRIORITY = {"high", "medium", "low"}
+
+
+class PersonalCategoryCreate(BaseModel):
+    name: str
+    color: Optional[str] = "#6366f1"
+    sort_order: Optional[int] = 0
+
+
+class PersonalCategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class PersonalTaskCreate(BaseModel):
+    title: str
+    category: Optional[str] = None
+    notes: Optional[str] = ""
+    status: Optional[str] = "todo"
+    priority: Optional[str] = "medium"
+    due_date: Optional[str] = None  # YYYY-MM-DD
+    tags: Optional[list[str]] = None
+    sort_order: Optional[int] = 0
+
+
+class PersonalTaskUpdate(BaseModel):
+    title: Optional[str] = None
+    category: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    due_date: Optional[str] = None
+    tags: Optional[list[str]] = None
+    sort_order: Optional[int] = None
+
+
+@app.get("/api/me/categories")
+def list_personal_categories(user: dict = Depends(get_current_user)):
+    result = supabase.table("personal_categories") \
+        .select("*") \
+        .eq("owner", user["character_name"]) \
+        .order("sort_order").order("id").execute()
+    return result.data or []
+
+
+@app.post("/api/me/categories")
+def create_personal_category(req: PersonalCategoryCreate, user: dict = Depends(get_current_user)):
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="카테고리 이름을 입력해주세요")
+    if len(name) > 30:
+        raise HTTPException(status_code=400, detail="카테고리 이름은 30자 이내로 입력해주세요")
+    existing = supabase.table("personal_categories") \
+        .select("id").eq("owner", user["character_name"]).eq("name", name).execute()
+    if existing.data:
+        raise HTTPException(status_code=409, detail="이미 존재하는 카테고리입니다")
+    result = supabase.table("personal_categories").insert({
+        "owner": user["character_name"],
+        "name": name,
+        "color": req.color or "#6366f1",
+        "sort_order": req.sort_order or 0,
+    }).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.patch("/api/me/categories/{category_id}")
+def update_personal_category(category_id: int, req: PersonalCategoryUpdate, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_categories") \
+        .select("*").eq("id", category_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="카테고리를 찾을 수 없습니다")
+    old = existing.data[0]
+    updates = {}
+    new_name = None
+    if req.name is not None:
+        new_name = req.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="카테고리 이름을 입력해주세요")
+        if len(new_name) > 30:
+            raise HTTPException(status_code=400, detail="카테고리 이름은 30자 이내로 입력해주세요")
+        if new_name != old["name"]:
+            dup = supabase.table("personal_categories") \
+                .select("id").eq("owner", user["character_name"]).eq("name", new_name).execute()
+            if dup.data:
+                raise HTTPException(status_code=409, detail="이미 존재하는 카테고리입니다")
+        updates["name"] = new_name
+    if req.color is not None:
+        updates["color"] = req.color
+    if req.sort_order is not None:
+        updates["sort_order"] = req.sort_order
+    if not updates:
+        return old
+    result = supabase.table("personal_categories").update(updates).eq("id", category_id).execute()
+    # 이름이 바뀌면 task 의 category 필드도 같이 갱신
+    if new_name and new_name != old["name"]:
+        supabase.table("personal_tasks").update({"category": new_name}) \
+            .eq("owner", user["character_name"]).eq("category", old["name"]).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.delete("/api/me/categories/{category_id}")
+def delete_personal_category(category_id: int, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_categories") \
+        .select("name").eq("id", category_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="카테고리를 찾을 수 없습니다")
+    name = existing.data[0]["name"]
+    supabase.table("personal_categories").delete().eq("id", category_id).execute()
+    # 해당 카테고리를 가진 task 는 category=null 로 (데이터 보존)
+    supabase.table("personal_tasks").update({"category": None}) \
+        .eq("owner", user["character_name"]).eq("category", name).execute()
+    return {"status": "ok"}
+
+
+@app.get("/api/me/tasks")
+def list_personal_tasks(
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    query = supabase.table("personal_tasks") \
+        .select("*").eq("owner", user["character_name"])
+    if status and status in ALLOWED_TASK_STATUS:
+        query = query.eq("status", status)
+    if category:
+        query = query.eq("category", category)
+    result = query.order("sort_order").order("id", desc=True).execute()
+    return result.data or []
+
+
+@app.post("/api/me/tasks")
+def create_personal_task(req: PersonalTaskCreate, user: dict = Depends(get_current_user)):
+    title = (req.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="할 일 제목을 입력해주세요")
+    if len(title) > 200:
+        raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
+    status = req.status or "todo"
+    if status not in ALLOWED_TASK_STATUS:
+        raise HTTPException(status_code=400, detail="잘못된 상태값입니다")
+    priority = req.priority or "medium"
+    if priority not in ALLOWED_TASK_PRIORITY:
+        raise HTTPException(status_code=400, detail="잘못된 우선순위입니다")
+    row = {
+        "owner": user["character_name"],
+        "title": title,
+        "category": req.category,
+        "notes": req.notes or "",
+        "status": status,
+        "priority": priority,
+        "due_date": req.due_date or None,
+        "tags": req.tags or [],
+        "sort_order": req.sort_order or 0,
+    }
+    if status == "done":
+        row["completed_at"] = datetime.now().isoformat()
+    result = supabase.table("personal_tasks").insert(row).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.patch("/api/me/tasks/{task_id}")
+def update_personal_task(task_id: int, req: PersonalTaskUpdate, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_tasks") \
+        .select("*").eq("id", task_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="할 일을 찾을 수 없습니다")
+    old = existing.data[0]
+    updates: dict = {}
+    if req.title is not None:
+        title = req.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="제목을 입력해주세요")
+        if len(title) > 200:
+            raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
+        updates["title"] = title
+    if req.category is not None:
+        updates["category"] = req.category or None
+    if req.notes is not None:
+        updates["notes"] = req.notes
+    if req.status is not None:
+        if req.status not in ALLOWED_TASK_STATUS:
+            raise HTTPException(status_code=400, detail="잘못된 상태값입니다")
+        updates["status"] = req.status
+        if req.status == "done" and old["status"] != "done":
+            updates["completed_at"] = datetime.now().isoformat()
+        elif req.status != "done":
+            updates["completed_at"] = None
+    if req.priority is not None:
+        if req.priority not in ALLOWED_TASK_PRIORITY:
+            raise HTTPException(status_code=400, detail="잘못된 우선순위입니다")
+        updates["priority"] = req.priority
+    if req.due_date is not None:
+        updates["due_date"] = req.due_date or None
+    if req.tags is not None:
+        updates["tags"] = req.tags
+    if req.sort_order is not None:
+        updates["sort_order"] = req.sort_order
+    if not updates:
+        return old
+    updates["updated_at"] = datetime.now().isoformat()
+    result = supabase.table("personal_tasks").update(updates).eq("id", task_id).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.delete("/api/me/tasks/{task_id}")
+def delete_personal_task(task_id: int, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_tasks") \
+        .select("id").eq("id", task_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="할 일을 찾을 수 없습니다")
+    supabase.table("personal_tasks").delete().eq("id", task_id).execute()
+    return {"status": "ok"}
