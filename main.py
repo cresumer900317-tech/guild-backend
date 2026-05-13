@@ -1304,6 +1304,7 @@ class PersonalCategoryUpdate(BaseModel):
 class PersonalTaskCreate(BaseModel):
     title: str
     category: Optional[str] = None
+    project_id: Optional[int] = None
     notes: Optional[str] = ""
     status: Optional[str] = "todo"
     priority: Optional[str] = "medium"
@@ -1315,6 +1316,7 @@ class PersonalTaskCreate(BaseModel):
 class PersonalTaskUpdate(BaseModel):
     title: Optional[str] = None
     category: Optional[str] = None
+    project_id: Optional[int] = None
     notes: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
@@ -1434,6 +1436,7 @@ def create_personal_task(req: PersonalTaskCreate, user: dict = Depends(get_curre
         "owner": user["character_name"],
         "title": title,
         "category": req.category,
+        "project_id": req.project_id,
         "notes": req.notes or "",
         "status": status,
         "priority": priority,
@@ -1464,6 +1467,9 @@ def update_personal_task(task_id: int, req: PersonalTaskUpdate, user: dict = Dep
         updates["title"] = title
     if req.category is not None:
         updates["category"] = req.category or None
+    if req.project_id is not None:
+        # 0 또는 음수 → null 처리
+        updates["project_id"] = req.project_id if req.project_id and req.project_id > 0 else None
     if req.notes is not None:
         updates["notes"] = req.notes
     if req.status is not None:
@@ -1499,3 +1505,364 @@ def delete_personal_task(task_id: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="할 일을 찾을 수 없습니다")
     supabase.table("personal_tasks").delete().eq("id", task_id).execute()
     return {"status": "ok"}
+
+
+# ── 프로젝트 ──────────────────────────────────────────────────
+
+ALLOWED_PROJECT_STATUS = {"active", "paused", "done", "dropped"}
+
+
+class PersonalProjectCreate(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    status: Optional[str] = "active"
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    progress_pct: Optional[int] = 0
+    color: Optional[str] = "#6366f1"
+    notes: Optional[str] = ""
+    sort_order: Optional[int] = 0
+
+
+class PersonalProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    progress_pct: Optional[int] = None
+    color: Optional[str] = None
+    notes: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+def _project_with_progress(project: dict, tasks: list[dict]) -> dict:
+    """프로젝트에 자동 계산된 task_count, done_count, computed_progress 추가"""
+    related = [t for t in tasks if t.get("project_id") == project["id"]]
+    total = len(related)
+    done = sum(1 for t in related if t.get("status") == "done")
+    computed = round(done / total * 100) if total else 0
+    return {
+        **project,
+        "task_count": total,
+        "done_count": done,
+        "computed_progress": computed,
+    }
+
+
+@app.get("/api/me/projects")
+def list_personal_projects(user: dict = Depends(get_current_user)):
+    proj_result = supabase.table("personal_projects") \
+        .select("*").eq("owner", user["character_name"]) \
+        .order("sort_order").order("id").execute()
+    projects = proj_result.data or []
+    if not projects:
+        return []
+    task_result = supabase.table("personal_tasks") \
+        .select("id,project_id,status").eq("owner", user["character_name"]).execute()
+    tasks = task_result.data or []
+    return [_project_with_progress(p, tasks) for p in projects]
+
+
+@app.post("/api/me/projects")
+def create_personal_project(req: PersonalProjectCreate, user: dict = Depends(get_current_user)):
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="프로젝트 이름을 입력해주세요")
+    if len(name) > 100:
+        raise HTTPException(status_code=400, detail="프로젝트 이름은 100자 이내로 입력해주세요")
+    status = req.status or "active"
+    if status not in ALLOWED_PROJECT_STATUS:
+        raise HTTPException(status_code=400, detail="잘못된 상태값입니다")
+    progress = req.progress_pct if req.progress_pct is not None else 0
+    if progress < 0 or progress > 100:
+        raise HTTPException(status_code=400, detail="진행률은 0~100 사이여야 합니다")
+    row = {
+        "owner": user["character_name"],
+        "name": name,
+        "description": req.description or "",
+        "status": status,
+        "start_date": req.start_date or None,
+        "end_date": req.end_date or None,
+        "progress_pct": progress,
+        "color": req.color or "#6366f1",
+        "notes": req.notes or "",
+        "sort_order": req.sort_order or 0,
+    }
+    result = supabase.table("personal_projects").insert(row).execute()
+    created = result.data[0] if result.data else {}
+    return _project_with_progress(created, [])
+
+
+@app.patch("/api/me/projects/{project_id}")
+def update_personal_project(project_id: int, req: PersonalProjectUpdate, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_projects") \
+        .select("*").eq("id", project_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+    updates: dict = {}
+    if req.name is not None:
+        name = req.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="이름을 입력해주세요")
+        if len(name) > 100:
+            raise HTTPException(status_code=400, detail="이름은 100자 이내로 입력해주세요")
+        updates["name"] = name
+    if req.description is not None:
+        updates["description"] = req.description
+    if req.status is not None:
+        if req.status not in ALLOWED_PROJECT_STATUS:
+            raise HTTPException(status_code=400, detail="잘못된 상태값입니다")
+        updates["status"] = req.status
+    if req.start_date is not None:
+        updates["start_date"] = req.start_date or None
+    if req.end_date is not None:
+        updates["end_date"] = req.end_date or None
+    if req.progress_pct is not None:
+        if req.progress_pct < 0 or req.progress_pct > 100:
+            raise HTTPException(status_code=400, detail="진행률은 0~100 사이여야 합니다")
+        updates["progress_pct"] = req.progress_pct
+    if req.color is not None:
+        updates["color"] = req.color
+    if req.notes is not None:
+        updates["notes"] = req.notes
+    if req.sort_order is not None:
+        updates["sort_order"] = req.sort_order
+    if not updates:
+        return _project_with_progress(existing.data[0], [])
+    updates["updated_at"] = datetime.now().isoformat()
+    result = supabase.table("personal_projects").update(updates).eq("id", project_id).execute()
+    updated = result.data[0] if result.data else existing.data[0]
+    task_result = supabase.table("personal_tasks") \
+        .select("id,project_id,status").eq("owner", user["character_name"]).execute()
+    return _project_with_progress(updated, task_result.data or [])
+
+
+@app.delete("/api/me/projects/{project_id}")
+def delete_personal_project(project_id: int, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_projects") \
+        .select("id").eq("id", project_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+    # task 의 project_id 는 ON DELETE SET NULL 로 자동 해제
+    supabase.table("personal_projects").delete().eq("id", project_id).execute()
+    return {"status": "ok"}
+
+
+# ── Inbox (즉흥 메모) ─────────────────────────────────────────
+
+class PersonalInboxCreate(BaseModel):
+    content: str
+
+
+class PersonalInboxUpdate(BaseModel):
+    content: Optional[str] = None
+    processed: Optional[bool] = None
+
+
+class PersonalInboxPromote(BaseModel):
+    """Inbox 항목을 Task 로 승격할 때 사용"""
+    title: Optional[str] = None  # 미지정 시 content 그대로
+    category: Optional[str] = None
+    project_id: Optional[int] = None
+    priority: Optional[str] = "medium"
+    due_date: Optional[str] = None
+
+
+@app.get("/api/me/inbox")
+def list_personal_inbox(
+    processed: Optional[bool] = None,
+    limit: int = 100,
+    user: dict = Depends(get_current_user),
+):
+    query = supabase.table("personal_inbox") \
+        .select("*").eq("owner", user["character_name"])
+    if processed is not None:
+        query = query.eq("processed", processed)
+    result = query.order("created_at", desc=True).limit(max(1, min(limit, 500))).execute()
+    return result.data or []
+
+
+@app.post("/api/me/inbox")
+def create_personal_inbox(req: PersonalInboxCreate, user: dict = Depends(get_current_user)):
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="내용을 입력해주세요")
+    if len(content) > 2000:
+        raise HTTPException(status_code=400, detail="2000자 이내로 입력해주세요")
+    row = {
+        "owner": user["character_name"],
+        "content": content,
+        "processed": False,
+    }
+    result = supabase.table("personal_inbox").insert(row).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.patch("/api/me/inbox/{inbox_id}")
+def update_personal_inbox(inbox_id: int, req: PersonalInboxUpdate, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_inbox") \
+        .select("*").eq("id", inbox_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Inbox 항목을 찾을 수 없습니다")
+    updates: dict = {}
+    if req.content is not None:
+        content = req.content.strip()
+        if not content:
+            raise HTTPException(status_code=400, detail="내용을 입력해주세요")
+        updates["content"] = content
+    if req.processed is not None:
+        updates["processed"] = req.processed
+        updates["processed_at"] = datetime.now().isoformat() if req.processed else None
+    if not updates:
+        return existing.data[0]
+    result = supabase.table("personal_inbox").update(updates).eq("id", inbox_id).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.delete("/api/me/inbox/{inbox_id}")
+def delete_personal_inbox(inbox_id: int, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_inbox") \
+        .select("id").eq("id", inbox_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Inbox 항목을 찾을 수 없습니다")
+    supabase.table("personal_inbox").delete().eq("id", inbox_id).execute()
+    return {"status": "ok"}
+
+
+@app.post("/api/me/inbox/{inbox_id}/promote")
+def promote_inbox_to_task(inbox_id: int, req: PersonalInboxPromote, user: dict = Depends(get_current_user)):
+    """Inbox 항목 → 새 Task 로 승격하고 inbox 항목은 processed 처리"""
+    existing = supabase.table("personal_inbox") \
+        .select("*").eq("id", inbox_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Inbox 항목을 찾을 수 없습니다")
+    inbox = existing.data[0]
+
+    raw_title = (req.title or inbox["content"] or "").strip()
+    if not raw_title:
+        raise HTTPException(status_code=400, detail="제목이 비어있습니다")
+    title = raw_title[:200]
+    notes = "" if req.title else ""  # 제목이 본문 자체면 별도 메모 비움
+    if req.title and inbox["content"] and inbox["content"] != req.title:
+        notes = inbox["content"]
+
+    priority = req.priority or "medium"
+    if priority not in ALLOWED_TASK_PRIORITY:
+        priority = "medium"
+
+    task_row = {
+        "owner": user["character_name"],
+        "title": title,
+        "category": req.category,
+        "project_id": req.project_id,
+        "notes": notes,
+        "status": "todo",
+        "priority": priority,
+        "due_date": req.due_date or None,
+        "tags": [],
+        "sort_order": 0,
+    }
+    task_result = supabase.table("personal_tasks").insert(task_row).execute()
+    new_task = task_result.data[0] if task_result.data else None
+
+    supabase.table("personal_inbox").update({
+        "processed": True,
+        "processed_at": datetime.now().isoformat(),
+        "promoted_task_id": new_task["id"] if new_task else None,
+    }).eq("id", inbox_id).execute()
+
+    return {"task": new_task, "inbox_id": inbox_id}
+
+
+# ── Daily Logs (그날 뭐 했는지) ──────────────────────────────
+
+class PersonalDailyLogUpsert(BaseModel):
+    log_date: Optional[str] = None  # YYYY-MM-DD; 미지정 시 오늘
+    content: str
+
+
+@app.get("/api/me/daily-logs")
+def list_personal_daily_logs(
+    start: Optional[str] = None,  # YYYY-MM-DD
+    end: Optional[str] = None,    # YYYY-MM-DD
+    limit: int = 60,
+    user: dict = Depends(get_current_user),
+):
+    query = supabase.table("personal_daily_logs") \
+        .select("*").eq("owner", user["character_name"])
+    if start:
+        query = query.gte("log_date", start)
+    if end:
+        query = query.lte("log_date", end)
+    result = query.order("log_date", desc=True).limit(max(1, min(limit, 366))).execute()
+    return result.data or []
+
+
+@app.get("/api/me/daily-logs/{log_date}")
+def get_personal_daily_log(log_date: str, user: dict = Depends(get_current_user)):
+    """특정 날짜 로그 조회 — 없으면 빈 객체 반환"""
+    result = supabase.table("personal_daily_logs") \
+        .select("*").eq("owner", user["character_name"]).eq("log_date", log_date).execute()
+    if not result.data:
+        return {"log_date": log_date, "content": "", "id": None}
+    return result.data[0]
+
+
+@app.put("/api/me/daily-logs")
+def upsert_personal_daily_log(req: PersonalDailyLogUpsert, user: dict = Depends(get_current_user)):
+    """날짜 단위 upsert — 같은 날짜에 두 번 저장하면 덮어씀"""
+    log_date = req.log_date or datetime.now().strftime("%Y-%m-%d")
+    content = req.content if req.content is not None else ""
+    if len(content) > 20000:
+        raise HTTPException(status_code=400, detail="20000자 이내로 입력해주세요")
+
+    existing = supabase.table("personal_daily_logs") \
+        .select("id").eq("owner", user["character_name"]).eq("log_date", log_date).execute()
+    if existing.data:
+        result = supabase.table("personal_daily_logs").update({
+            "content": content,
+            "updated_at": datetime.now().isoformat(),
+        }).eq("id", existing.data[0]["id"]).execute()
+    else:
+        result = supabase.table("personal_daily_logs").insert({
+            "owner": user["character_name"],
+            "log_date": log_date,
+            "content": content,
+        }).execute()
+    return result.data[0] if result.data else {"log_date": log_date, "content": content}
+
+
+@app.delete("/api/me/daily-logs/{log_date}")
+def delete_personal_daily_log(log_date: str, user: dict = Depends(get_current_user)):
+    supabase.table("personal_daily_logs") \
+        .delete().eq("owner", user["character_name"]).eq("log_date", log_date).execute()
+    return {"status": "ok"}
+
+
+# ── 대시보드 요약 (한 번에 다 가져오기) ──────────────────────
+
+@app.get("/api/me/dashboard")
+def get_personal_dashboard(user: dict = Depends(get_current_user)):
+    """대시보드 한 번에 — tasks, projects, inbox, recent daily logs 한꺼번에 반환"""
+    owner = user["character_name"]
+    tasks = supabase.table("personal_tasks") \
+        .select("*").eq("owner", owner).execute().data or []
+    projects = supabase.table("personal_projects") \
+        .select("*").eq("owner", owner).order("sort_order").order("id").execute().data or []
+    inbox = supabase.table("personal_inbox") \
+        .select("*").eq("owner", owner).eq("processed", False) \
+        .order("created_at", desc=True).limit(20).execute().data or []
+    logs = supabase.table("personal_daily_logs") \
+        .select("*").eq("owner", owner) \
+        .order("log_date", desc=True).limit(7).execute().data or []
+    categories = supabase.table("personal_categories") \
+        .select("*").eq("owner", owner).order("sort_order").execute().data or []
+
+    return {
+        "tasks": tasks,
+        "projects": [_project_with_progress(p, tasks) for p in projects],
+        "inbox": inbox,
+        "daily_logs": logs,
+        "categories": categories,
+    }
