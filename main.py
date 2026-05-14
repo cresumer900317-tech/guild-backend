@@ -2531,3 +2531,22 @@ def get_ai_usage(user: dict = Depends(get_current_user)):
 
     _USAGE_CACHE[owner] = (now_ts, payload)
     return payload
+
+# ── 개인 업무 디지스트 (테스트용 수동 트리거) ──────────────
+@app.post("/api/me/digest/send-test")
+def send_digest_test(user: dict = Depends(get_current_user)):
+    from email_digest import send_digest
+    try:
+        result = send_digest(user["character_name"])
+        return {"ok": True, "id": result.get("id")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/me/digest/preview")
+def preview_digest(user: dict = Depends(get_current_user)):
+    """디지스트 HTML 미리보기 (브라우저에서 GET 가능)."""
+    from email_digest import build_digest
+    from fastapi.responses import HTMLResponse
+    digest = build_digest(user["character_name"])
+    return HTMLResponse(content=digest["html"])

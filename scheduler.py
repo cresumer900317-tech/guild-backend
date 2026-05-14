@@ -235,6 +235,17 @@ def start_scheduler():
         CronTrigger(day=1, hour=0, minute=10)
     )
 
+    # 매일 08:00 KST 개인 업무 디지스트 이메일
+    try:
+        from email_digest import run_daily_digest
+        scheduler.add_job(
+            run_daily_digest,
+            CronTrigger(hour=8, minute=0, timezone="Asia/Seoul")
+        )
+        logger.info("디지스트 잡 등록 완료 (매일 08:00 KST)")
+    except Exception as e:
+        logger.error(f"디지스트 잡 등록 실패: {e}")
+
     scheduler.start()
-    logger.info("스케줄러 시작 (1시간마다 크롤링, 매달 1일 00:05 스냅샷)")
+    logger.info("스케줄러 시작 (1시간마다 크롤링, 매달 1일 00:05 스냅샷, 매일 08:00 KST 디지스트)")
     return scheduler
