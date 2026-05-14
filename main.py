@@ -161,6 +161,11 @@ def root():
     return {"status": "ok", "message": "친구패밀리 백엔드 작동 중!", "version": "2026-04-15-v3"}
 
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
 def fetch_members_raw(filters: str = "", order: str = "server_rank"):
     """Supabase REST API로 members 직접 조회 (스키마 캐시 우회)"""
     import httpx
