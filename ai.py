@@ -37,6 +37,8 @@ MAX_INPUT_CHARS = 80_000
 EXTRACT_KIND = "daily_log_extract"
 SEARCH_KIND = "search"
 CLASSIFY_KIND = "inbox_classify"
+BRIEFING_KIND = "dashboard_briefing"
+DAILY_TEMPLATE_KIND = "daily_template"
 
 
 def is_enabled() -> bool:
@@ -352,6 +354,110 @@ def _parse_classify_json(raw: str, categories: list[str]) -> dict:
         "suggested_priority": prio_raw,
         "suggested_tags": tags,
     }
+
+
+# ── 4) Dashboard briefing (Phase 7) ────────────────────────────────
+
+_BRIEFING_SYSTEM = (
+    "너는 사용자의 오늘 업무 상태를 1~3문장 한국어로 요약하는 비서다.\n"
+    "주어진 숫자(오늘 마감 / 미처리 메모 / 진행 중 프로젝트 / 위험 task) 와 "
+    "최근 하루 로그·진행 중 task 일부를 보고, 친절하지만 간결하게 한 단락으로 답한다.\n\n"
+    "규칙:\n"
+    "1. 1~3문장. 절대 4문장 넘지 말 것.\n"
+    "2. 절대 데이터 없는 내용 만들어내지 말 것. 모르면 짧게 '오늘 큰 일정은 없어요' 정도.\n"
+    "3. 이모지는 0~1개만. 과하지 않게.\n"
+    "4. 평어체로 따뜻하게.\n"
+    "5. JSON 등 형식 없이 그냥 한 단락 텍스트로만 응답.\n"
+)
+
+
+def dashboard_briefing(stats: dict, sample: dict) -> str:
+    """Generate a 1-3 sentence dashboard briefing.
+
+    `stats`: {today_due, inbox_unprocessed, projects_active, at_risk}
+    `sample`: {today_tasks: [..titles..], recent_log_excerpt: str}
+    Returns plain Korean text (no JSON).
+    """
+    payload = {
+        "today_due": int(stats.get("today_due", 0)),
+        "inbox_unprocessed": int(stats.get("inbox_unprocessed", 0)),
+        "projects_active": int(stats.get("projects_active", 0)),
+        "at_risk": int(stats.get("at_risk", 0)),
+        "today_tasks": [str(t)[:60] for t in (sample.get("today_tasks") or [])][:8],
+        "recent_log_excerpt": (sample.get("recent_log_excerpt") or "")[:600],
+    }
+    user_prompt = (
+        "오늘 상태:\n"
+        f"- 오늘 마감 또는 지난 task: {payload['today_due']}개\n"
+        f"- 미처리 메모(Inbox): {payload['inbox_unprocessed']}개\n"
+        f"- 진행 중 프로젝트: {payload['projects_active']}개\n"
+        f"- 위험(우선순위 high & 마감 D-3 이내): {payload['at_risk']}개\n"
+    )
+    if payload["today_tasks"]:
+        user_prompt += "\n오늘 task 일부:\n" + "\n".join(
+            f"- {t}" for t in payload["today_tasks"]
+        ) + "\n"
+    if payload["recent_log_excerpt"]:
+        user_prompt += (
+            "\n최근 하루 로그 발췌:\n---\n"
+            f"{payload['recent_log_excerpt']}\n---\n"
+        )
+    user_prompt += "\n위 정보를 보고 1~3문장 한국어로 오늘 상태를 친절하게 요약해주세요."
+
+    msg = _client().messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=300,
+        system=_BRIEFING_SYSTEM,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    _log_usage("briefing", msg)
+    text = _collect_text(msg)
+    if len(text) > 600:
+        text = text[:600].rstrip() + "…"
+    return text
+
+
+# ── 5) Daily log auto-template (Phase 7) ───────────────────────────
+
+def daily_auto_template(today_str: str, completed_titles: list[str],
+                        today_due_titles: list[str],
+                        active_project_names: list[str]) -> str:
+    """Build a deterministic daily-log starter template — no AI call needed.
+
+    Lightweight scaffolding so users see a useful editable draft when opening
+    today's empty log. Pure Python so it works even when ANTHROPIC_API_KEY
+    is missing.
+    """
+    lines: list[str] = []
+
+    lines.append("# 오늘 완료한 일")
+    if completed_titles:
+        for t in completed_titles[:20]:
+            lines.append(f"- {t}")
+    else:
+        lines.append("- ")
+    lines.append("")
+
+    lines.append("# 오늘 일정")
+    if today_due_titles:
+        for t in today_due_titles[:20]:
+            lines.append(f"- {t}")
+    else:
+        lines.append("- ")
+    lines.append("")
+
+    if active_project_names:
+        lines.append("# 진행 중 프로젝트")
+        for n in active_project_names[:8]:
+            lines.append(f"- {n}")
+        lines.append("")
+
+    lines.append("# 회고 (선택)")
+    lines.append("- 잘된 것: ")
+    lines.append("- 아쉬운 것: ")
+    lines.append("- 내일 우선: ")
+
+    return "\n".join(lines)
 
 
 def _parse_search_json(raw: str) -> dict:

@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from typing import Optional, Literal
+import json
 import os
 import jwt
 from pydantic import BaseModel, field_validator
@@ -2191,4 +2192,169 @@ def personal_search(req: PersonalSearchRequest, user: dict = Depends(get_current
         "days": days,
         "logs_searched": len(logs),
         **result,
+    }
+
+
+# ════════════════════════════════════════════════════════
+# Phase 7 — Dashboard briefing + Daily auto-template
+# ════════════════════════════════════════════════════════
+
+def _briefing_stats(owner: str) -> tuple[dict, dict]:
+    """Compute stats + sample for the dashboard briefing."""
+    today = datetime.now().date().strftime("%Y-%m-%d")
+    tasks = supabase.table("personal_tasks") \
+        .select("*").eq("owner", owner).execute().data or []
+    open_tasks = [t for t in tasks if t.get("status") != "done"]
+
+    today_due = [
+        t for t in open_tasks
+        if t.get("due_date") and t["due_date"] <= today
+    ]
+    today_due_today_only = [
+        t for t in open_tasks if t.get("due_date") == today
+    ]
+
+    in_3days = (datetime.now().date() + timedelta(days=3)).strftime("%Y-%m-%d")
+    at_risk = [
+        t for t in open_tasks
+        if t.get("priority") == "high"
+        and t.get("due_date")
+        and t["due_date"] <= in_3days
+    ]
+
+    inbox_unprocessed = supabase.table("personal_inbox") \
+        .select("id", count="exact").eq("owner", owner).eq("processed", False).execute()
+    inbox_count = inbox_unprocessed.count or 0
+
+    projects_active = supabase.table("personal_projects") \
+        .select("id", count="exact").eq("owner", owner).eq("status", "active").execute()
+    projects_count = projects_active.count or 0
+
+    last_log = supabase.table("personal_daily_logs") \
+        .select("content, log_date").eq("owner", owner) \
+        .order("log_date", desc=True).limit(1).execute()
+    log_excerpt = ""
+    if last_log.data:
+        log_excerpt = (last_log.data[0].get("content") or "")[:600]
+
+    stats = {
+        "today_due": len(today_due),
+        "today_due_only": len(today_due_today_only),
+        "inbox_unprocessed": inbox_count,
+        "projects_active": projects_count,
+        "at_risk": len(at_risk),
+    }
+    sample = {
+        "today_tasks": [t.get("title") for t in today_due][:8],
+        "recent_log_excerpt": log_excerpt,
+    }
+    return stats, sample
+
+
+def _briefing_signature(stats: dict, sample: dict) -> str:
+    """Hash that changes whenever briefing inputs change — for daily caching."""
+    today = datetime.now().date().strftime("%Y-%m-%d")
+    sig = json.dumps({
+        "d": today,
+        "s": stats,
+        "tt": sample.get("today_tasks", []),
+        "le": ai_service.content_hash(sample.get("recent_log_excerpt", "")),
+    }, ensure_ascii=False, sort_keys=True)
+    return ai_service.content_hash(sig)
+
+
+@app.post("/api/me/dashboard-briefing")
+def dashboard_briefing(force: bool = False, user: dict = Depends(get_current_user)):
+    """오늘의 브리핑 — Claude haiku 1~3문장 + 핵심 숫자 카드.
+
+    동일한 입력(같은 날 + 같은 stats/log)은 24h 캐시 재사용.
+    AI 비활성 시: text 는 비고 numbers/at_risk 만 반환 (graceful 503-style).
+    """
+    owner = user["character_name"]
+    stats, sample = _briefing_stats(owner)
+
+    base = {
+        "today": datetime.now().date().strftime("%Y-%m-%d"),
+        "numbers": {
+            "today_due": stats["today_due"],
+            "inbox_unprocessed": stats["inbox_unprocessed"],
+            "projects_active": stats["projects_active"],
+            "at_risk": stats["at_risk"],
+        },
+    }
+
+    if not ai_service.is_enabled():
+        return {**base, "text": "", "ai_enabled": False, "cached": False}
+
+    sig = _briefing_signature(stats, sample)
+
+    if not force:
+        cache = supabase.table("personal_ai_summaries") \
+            .select("payload, created_at") \
+            .eq("owner", owner) \
+            .eq("kind", ai_service.BRIEFING_KIND) \
+            .eq("source_hash", sig) \
+            .order("created_at", desc=True).limit(1).execute()
+        if cache.data:
+            row = cache.data[0]
+            payload = row.get("payload") or {}
+            return {
+                **base,
+                "text": payload.get("text") or "",
+                "ai_enabled": True,
+                "cached": True,
+                "generated_at": row.get("created_at"),
+            }
+
+    try:
+        text = ai_service.dashboard_briefing(stats, sample)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
+
+    supabase.table("personal_ai_summaries").insert({
+        "owner": owner,
+        "kind": ai_service.BRIEFING_KIND,
+        "source_hash": sig,
+        "payload": {"text": text, "stats": stats},
+    }).execute()
+
+    return {**base, "text": text, "ai_enabled": True, "cached": False}
+
+
+@app.get("/api/me/daily-logs/{log_date}/auto-template")
+def daily_log_auto_template(log_date: str, user: dict = Depends(get_current_user)):
+    """오늘 완료한 task / 오늘 마감 / 진행 중 프로젝트 기반 자동 초안 생성.
+
+    AI 호출 없음 — 결정론적 템플릿. 빈 textarea 채우는 용도.
+    """
+    owner = user["character_name"]
+    tasks = supabase.table("personal_tasks") \
+        .select("title, status, due_date, updated_at") \
+        .eq("owner", owner).execute().data or []
+
+    completed_today = [
+        t.get("title") for t in tasks
+        if t.get("status") == "done"
+        and (t.get("updated_at") or "").startswith(log_date)
+    ]
+    today_due = [
+        t.get("title") for t in tasks
+        if t.get("status") != "done" and t.get("due_date") == log_date
+    ]
+    projects = supabase.table("personal_projects") \
+        .select("name").eq("owner", owner).eq("status", "active") \
+        .order("sort_order").limit(8).execute().data or []
+    project_names = [p.get("name") for p in projects if p.get("name")]
+
+    template = ai_service.daily_auto_template(
+        log_date,
+        [t for t in completed_today if t],
+        [t for t in today_due if t],
+        project_names,
+    )
+    return {
+        "log_date": log_date,
+        "template": template,
+        "completed_count": len([t for t in completed_today if t]),
+        "due_today_count": len([t for t in today_due if t]),
     }
