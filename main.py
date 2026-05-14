@@ -1956,7 +1956,7 @@ def analyze_daily_log(log_date: str, user: dict = Depends(get_current_user)):
         }
 
     try:
-        extract = ai_service.extract_from_daily_log(content, log_date)
+        extract = ai_service.extract_from_daily_log(content, log_date, owner=owner)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
 
@@ -2102,7 +2102,7 @@ def _classify_one_inbox(inbox_row: dict, categories: list[str], owner: str) -> d
         sug = payload.get("suggestion") or ai_service._empty_classify()
         return {"inbox_id": inbox_row.get("id"), "cached": True, **sug}
 
-    suggestion = ai_service.classify_inbox_item(content, categories)
+    suggestion = ai_service.classify_inbox_item(content, categories, owner=owner)
 
     supabase.table("personal_ai_summaries").insert({
         "owner": owner,
@@ -2182,7 +2182,7 @@ def personal_search(req: PersonalSearchRequest, user: dict = Depends(get_current
         .limit(180).execute().data or []
 
     try:
-        result = ai_service.smart_search(query, logs)
+        result = ai_service.smart_search(query, logs, owner=owner)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
 
@@ -2307,7 +2307,7 @@ def dashboard_briefing(force: bool = False, user: dict = Depends(get_current_use
             }
 
     try:
-        text = ai_service.dashboard_briefing(stats, sample)
+        text = ai_service.dashboard_briefing(stats, sample, owner=owner)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
 
@@ -2358,3 +2358,176 @@ def daily_log_auto_template(log_date: str, user: dict = Depends(get_current_user
         "completed_count": len([t for t in completed_today if t]),
         "due_today_count": len([t for t in today_due if t]),
     }
+
+
+# ════════════════════════════════════════════════════════
+# Phase 8 — AI 토큰·비용 사용량 추적 (personal_ai_usage)
+# ════════════════════════════════════════════════════════
+
+import ai_pricing  # noqa: E402
+
+_USAGE_CACHE: dict[str, tuple[float, dict]] = {}
+_USAGE_CACHE_TTL = 60.0  # seconds
+
+
+def _last_day_of_month(d) -> int:
+    """주어진 날짜가 속한 월의 마지막 일(28~31) 반환."""
+    if d.month == 12:
+        return 31
+    next_first = d.replace(day=1).replace(month=d.month + 1)
+    last = next_first - timedelta(days=1)
+    return last.day
+
+
+def _aggregate_rows(rows: list[dict], start_iso: str | None = None) -> dict:
+    """rows 중 created_at >= start_iso 인 것만 합산. start_iso=None 이면 전체."""
+    calls = 0
+    tin = 0
+    tout = 0
+    cost = 0.0
+    for r in rows:
+        created = r.get("created_at") or ""
+        if start_iso and created < start_iso:
+            continue
+        calls += 1
+        tin += int(r.get("input_tokens") or 0)
+        tout += int(r.get("output_tokens") or 0)
+        try:
+            cost += float(r.get("cost_usd") or 0)
+        except (TypeError, ValueError):
+            pass
+    return {
+        "calls": calls,
+        "tokens_in": tin,
+        "tokens_out": tout,
+        "cost_usd": round(cost, 6),
+    }
+
+
+@app.get("/api/me/ai-usage")
+def get_ai_usage(user: dict = Depends(get_current_user)):
+    """이번 달 / 이번 주 / 오늘 AI 호출·토큰·비용 통계.
+
+    빈 응답이라도 200 으로 내려 위젯이 항상 떠 있게 한다.
+    60초 캐시 (owner 별).
+    """
+    import time
+    owner = user["character_name"]
+
+    # owner 캐시
+    cached = _USAGE_CACHE.get(owner)
+    now_ts = time.time()
+    if cached and (now_ts - cached[0]) < _USAGE_CACHE_TTL:
+        return cached[1]
+
+    now = datetime.now()
+    today = now.date()
+    today_iso = today.strftime("%Y-%m-%d")
+    month_start = today.replace(day=1)
+    month_start_iso = month_start.strftime("%Y-%m-%dT00:00:00")
+    # 이번 주 = 월요일 시작
+    week_start = today - timedelta(days=today.weekday())
+    week_start_iso = week_start.strftime("%Y-%m-%dT00:00:00")
+    today_start_iso = today.strftime("%Y-%m-%dT00:00:00")
+    last30_start = today - timedelta(days=29)
+    last30_start_iso = last30_start.strftime("%Y-%m-%dT00:00:00")
+
+    # 이번 달 + 지난 30일 둘 다 커버하기 위해 더 이른 시작점 기준으로 한 번에 가져옴
+    fetch_from_iso = min(month_start_iso, last30_start_iso)
+
+    # personal_ai_usage 테이블이 아직 마이그레이트 안 됐을 수도 있다.
+    # 그래도 위젯이 깨지지 않도록 빈 통계 응답.
+    table_missing = False
+    try:
+        rows = supabase.table("personal_ai_usage") \
+            .select("created_at, kind, input_tokens, output_tokens, cost_usd") \
+            .eq("owner", owner) \
+            .gte("created_at", fetch_from_iso) \
+            .order("created_at", desc=True) \
+            .limit(5000) \
+            .execute().data or []
+    except Exception as e:
+        msg = str(e).lower()
+        if "personal_ai_usage" in msg or "does not exist" in msg or "schema cache" in msg:
+            table_missing = True
+            rows = []
+        else:
+            raise
+
+    today_agg = _aggregate_rows(rows, today_start_iso)
+    week_agg = _aggregate_rows(rows, week_start_iso)
+    month_agg = _aggregate_rows(rows, month_start_iso)
+
+    # 한도 / 진행률
+    limit_usd = ai_pricing.monthly_budget_usd()
+    pct = 0.0
+    if limit_usd > 0:
+        pct = round((month_agg["cost_usd"] / limit_usd) * 100.0, 2)
+    last_day = _last_day_of_month(today)
+    days_until_reset = max(1, last_day - today.day + 1)
+
+    # 종류별 (이번 달 기준)
+    by_kind_map: dict[str, dict] = {}
+    for r in rows:
+        if (r.get("created_at") or "") < month_start_iso:
+            continue
+        k = r.get("kind") or "other"
+        slot = by_kind_map.setdefault(k, {"calls": 0, "cost_usd": 0.0,
+                                          "tokens_in": 0, "tokens_out": 0})
+        slot["calls"] += 1
+        slot["tokens_in"] += int(r.get("input_tokens") or 0)
+        slot["tokens_out"] += int(r.get("output_tokens") or 0)
+        try:
+            slot["cost_usd"] += float(r.get("cost_usd") or 0)
+        except (TypeError, ValueError):
+            pass
+    by_kind = [
+        {"kind": k, **v, "cost_usd": round(v["cost_usd"], 6)}
+        for k, v in sorted(by_kind_map.items(), key=lambda kv: -kv[1]["cost_usd"])
+    ]
+
+    # 지난 30일 일별 (오늘 포함, 데이터 없는 날도 0 으로 채움)
+    daily_map: dict[str, float] = {}
+    daily_calls: dict[str, int] = {}
+    for r in rows:
+        created = r.get("created_at") or ""
+        if created < last30_start_iso:
+            continue
+        d = created[:10]
+        try:
+            daily_map[d] = daily_map.get(d, 0.0) + float(r.get("cost_usd") or 0)
+        except (TypeError, ValueError):
+            pass
+        daily_calls[d] = daily_calls.get(d, 0) + 1
+    daily_last_30 = []
+    for i in range(30):
+        d = (last30_start + timedelta(days=i)).strftime("%Y-%m-%d")
+        daily_last_30.append({
+            "date": d,
+            "cost_usd": round(daily_map.get(d, 0.0), 6),
+            "calls": daily_calls.get(d, 0),
+        })
+
+    payload = {
+        "today": {**today_agg, "date": today_iso},
+        "this_week": {**week_agg, "start": week_start.strftime("%Y-%m-%d")},
+        "this_month": {
+            **month_agg,
+            "start": month_start.strftime("%Y-%m-%d"),
+            "limit_usd": round(limit_usd, 2),
+            "pct": pct,
+            "days_until_reset": days_until_reset,
+        },
+        "by_kind": by_kind,
+        "daily_last_30": daily_last_30,
+        "model": ai_service.CLAUDE_MODEL,
+        "price": {
+            "input_per_m_usd": ai_pricing.PRICE_INPUT_PER_M_USD,
+            "output_per_m_usd": ai_pricing.PRICE_OUTPUT_PER_M_USD,
+        },
+        "ai_enabled": ai_service.is_enabled(),
+        "table_missing": table_missing,
+    }
+
+    _USAGE_CACHE[owner] = (now_ts, payload)
+    return payload

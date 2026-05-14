@@ -40,6 +40,12 @@ CLASSIFY_KIND = "inbox_classify"
 BRIEFING_KIND = "dashboard_briefing"
 DAILY_TEMPLATE_KIND = "daily_template"
 
+# personal_ai_usage 에 적재되는 kind 키. AI 호출이 실제 발생한 것만 기록.
+USAGE_KIND_EXTRACT = "daily_log_extract"
+USAGE_KIND_SEARCH = "search"
+USAGE_KIND_CLASSIFY = "inbox_classify"
+USAGE_KIND_BRIEFING = "briefing"
+
 
 def is_enabled() -> bool:
     return _ANTHROPIC_AVAILABLE and bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
@@ -66,6 +72,35 @@ def _log_usage(label: str, message: Any) -> None:
             )
     except Exception:
         pass
+
+
+def record_ai_usage(owner: str, kind: str, message: Any,
+                    model: str = CLAUDE_MODEL) -> None:
+    """Claude messages.create() 결과의 usage 를 personal_ai_usage 에 적재.
+
+    호출 실패해도 본 요청을 깨뜨리지 않도록 모든 예외 흡수.
+    """
+    try:
+        usage = getattr(message, "usage", None)
+        if not usage:
+            return
+        in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+        if in_tok <= 0 and out_tok <= 0:
+            return
+        import ai_pricing
+        from database import supabase
+        cost = ai_pricing.calc_cost_usd(in_tok, out_tok)
+        supabase.table("personal_ai_usage").insert({
+            "owner": owner,
+            "kind": kind,
+            "model": model or CLAUDE_MODEL,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "cost_usd": cost,
+        }).execute()
+    except Exception as e:
+        log.warning("ai_usage record failed (%s/%s): %s", owner, kind, e)
 
 
 def _collect_text(message: Any) -> str:
@@ -103,10 +138,12 @@ _EXTRACT_SYSTEM = (
 )
 
 
-def extract_from_daily_log(content: str, today: str) -> dict:
+def extract_from_daily_log(content: str, today: str,
+                           owner: str | None = None) -> dict:
     """Call Claude to extract structured items from a free-form daily log.
 
     Returns {tasks, future, decisions, tags}. Caller handles caching.
+    `owner` 가 주어지면 personal_ai_usage 에 토큰/비용 적재.
     """
     if not content.strip():
         return _empty_extract()
@@ -129,6 +166,8 @@ def extract_from_daily_log(content: str, today: str) -> dict:
         messages=[{"role": "user", "content": user_prompt}],
     )
     _log_usage("extract", msg)
+    if owner:
+        record_ai_usage(owner, USAGE_KIND_EXTRACT, msg)
     return _parse_extract_json(_collect_text(msg))
 
 
@@ -200,10 +239,11 @@ _SEARCH_SYSTEM = (
 )
 
 
-def smart_search(query: str, logs: list[dict]) -> dict:
+def smart_search(query: str, logs: list[dict], owner: str | None = None) -> dict:
     """Ask Claude to answer `query` using the provided log list.
 
     `logs`: list of {log_date, content}, most-recent first.
+    `owner` 가 주어지면 personal_ai_usage 에 토큰/비용 적재.
     """
     if not query.strip():
         return {"answer": "", "sources": []}
@@ -242,6 +282,8 @@ def smart_search(query: str, logs: list[dict]) -> dict:
         messages=[{"role": "user", "content": user_prompt}],
     )
     _log_usage("search", msg)
+    if owner:
+        record_ai_usage(owner, USAGE_KIND_SEARCH, msg)
     return _parse_search_json(_collect_text(msg))
 
 
@@ -269,11 +311,13 @@ _CLASSIFY_SYSTEM = (
 )
 
 
-def classify_inbox_item(content: str, categories: list[str]) -> dict:
+def classify_inbox_item(content: str, categories: list[str],
+                        owner: str | None = None) -> dict:
     """Classify a single inbox memo into title/category/priority/tags suggestions.
 
     `categories`: list of category names that the user has defined.
     Returns dict with the four suggested_* fields. Caller handles caching.
+    `owner` 가 주어지면 personal_ai_usage 에 토큰/비용 적재.
     """
     text = (content or "").strip()
     if not text:
@@ -300,6 +344,8 @@ def classify_inbox_item(content: str, categories: list[str]) -> dict:
         messages=[{"role": "user", "content": user_prompt}],
     )
     _log_usage("classify", msg)
+    if owner:
+        record_ai_usage(owner, USAGE_KIND_CLASSIFY, msg)
     return _parse_classify_json(_collect_text(msg), categories)
 
 
@@ -371,12 +417,14 @@ _BRIEFING_SYSTEM = (
 )
 
 
-def dashboard_briefing(stats: dict, sample: dict) -> str:
+def dashboard_briefing(stats: dict, sample: dict,
+                       owner: str | None = None) -> str:
     """Generate a 1-3 sentence dashboard briefing.
 
     `stats`: {today_due, inbox_unprocessed, projects_active, at_risk}
     `sample`: {today_tasks: [..titles..], recent_log_excerpt: str}
     Returns plain Korean text (no JSON).
+    `owner` 가 주어지면 personal_ai_usage 에 토큰/비용 적재.
     """
     payload = {
         "today_due": int(stats.get("today_due", 0)),
@@ -411,6 +459,8 @@ def dashboard_briefing(stats: dict, sample: dict) -> str:
         messages=[{"role": "user", "content": user_prompt}],
     )
     _log_usage("briefing", msg)
+    if owner:
+        record_ai_usage(owner, USAGE_KIND_BRIEFING, msg)
     text = _collect_text(msg)
     if len(text) > 600:
         text = text[:600].rstrip() + "…"
