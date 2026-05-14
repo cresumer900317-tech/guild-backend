@@ -36,6 +36,7 @@ MAX_INPUT_CHARS = 80_000
 
 EXTRACT_KIND = "daily_log_extract"
 SEARCH_KIND = "search"
+CLASSIFY_KIND = "inbox_classify"
 
 
 def is_enabled() -> bool:
@@ -240,6 +241,117 @@ def smart_search(query: str, logs: list[dict]) -> dict:
     )
     _log_usage("search", msg)
     return _parse_search_json(_collect_text(msg))
+
+
+# ── 3) Inbox classification (Phase 6d) ────────────────────────────
+
+_CLASSIFY_SYSTEM = (
+    "너는 한국어로 쓰인 짧은 메모/Inbox 항목을 정리하는 비서다.\n"
+    "주어진 메모와 사용자의 카테고리 목록을 보고, 다음을 추론한다:\n\n"
+    "1. suggested_title: 메모를 '할 일 제목'으로 깔끔히 다듬은 한 줄 (30자 이내).\n"
+    "   원문이 이미 짧고 깔끔한 제목이면 그대로 사용. 추측해서 새 내용 추가 금지.\n"
+    "2. suggested_category: 사용자 카테고리 목록 중 가장 어울리는 이름 1개.\n"
+    "   확실하지 않거나 어떤 것에도 안 맞으면 null.\n"
+    "3. suggested_priority: high | medium | low 중 하나.\n"
+    "   - high: '긴급', '오늘까지', '내일까지', '중요', 명백히 시간이 촉박한 경우.\n"
+    "   - low: 단순 메모, 아이디어, 참고용, 일회성 기록.\n"
+    "   - medium: 그 외 기본값.\n"
+    "4. suggested_tags: 메모에 등장하는 핵심 키워드 (프로젝트명/사람 이름/주제). 최대 3개. 없으면 빈 배열.\n\n"
+    "반드시 JSON 으로만 응답. 코드블록 금지. 형식:\n"
+    "{\n"
+    '  "suggested_title": "...",\n'
+    '  "suggested_category": "..." | null,\n'
+    '  "suggested_priority": "high" | "medium" | "low",\n'
+    '  "suggested_tags": ["...", ...]\n'
+    "}\n"
+)
+
+
+def classify_inbox_item(content: str, categories: list[str]) -> dict:
+    """Classify a single inbox memo into title/category/priority/tags suggestions.
+
+    `categories`: list of category names that the user has defined.
+    Returns dict with the four suggested_* fields. Caller handles caching.
+    """
+    text = (content or "").strip()
+    if not text:
+        return _empty_classify()
+
+    if len(text) > 2000:
+        text = text[:2000]
+
+    cat_block = (
+        "사용자 카테고리 목록: " + ", ".join(categories) + "\n"
+        if categories else "사용자 카테고리 목록: (없음)\n"
+    )
+    user_prompt = (
+        f"{cat_block}\n"
+        "다음은 사용자가 적은 메모입니다:\n---\n"
+        f"{text}\n---\n\n"
+        "위 JSON 형식으로만 응답해주세요."
+    )
+
+    msg = _client().messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=400,
+        system=_CLASSIFY_SYSTEM,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    _log_usage("classify", msg)
+    return _parse_classify_json(_collect_text(msg), categories)
+
+
+def _empty_classify() -> dict:
+    return {
+        "suggested_title": "",
+        "suggested_category": None,
+        "suggested_priority": "medium",
+        "suggested_tags": [],
+    }
+
+
+def _parse_classify_json(raw: str, categories: list[str]) -> dict:
+    s = _strip_fence(raw)
+    try:
+        data = json.loads(s)
+    except json.JSONDecodeError:
+        log.warning("ai.classify JSON parse failed: %r", raw[:200])
+        return _empty_classify()
+    if not isinstance(data, dict):
+        return _empty_classify()
+
+    title = str(data.get("suggested_title", "")).strip()[:60]
+
+    cat_raw = data.get("suggested_category")
+    cat = None
+    if cat_raw and isinstance(cat_raw, str):
+        cat_s = cat_raw.strip()
+        # 모델이 카테고리 외 값을 만들어내면 무시 (사용자 정의 외에는 안 받음)
+        if cat_s and cat_s in set(categories):
+            cat = cat_s
+
+    prio_raw = str(data.get("suggested_priority", "medium")).strip().lower()
+    if prio_raw not in ("high", "medium", "low"):
+        prio_raw = "medium"
+
+    tags_raw = data.get("suggested_tags") or []
+    tags: list[str] = []
+    if isinstance(tags_raw, list):
+        for t in tags_raw[:6]:
+            if not t:
+                continue
+            tag = str(t).strip()[:30]
+            if tag and tag not in tags:
+                tags.append(tag)
+            if len(tags) >= 3:
+                break
+
+    return {
+        "suggested_title": title,
+        "suggested_category": cat,
+        "suggested_priority": prio_raw,
+        "suggested_tags": tags,
+    }
 
 
 def _parse_search_json(raw: str) -> dict:

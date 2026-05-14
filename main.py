@@ -2077,6 +2077,88 @@ def dismiss_extract(eid: int, req: DismissExtractRequest, user: dict = Depends(g
     return {"status": "ok", "dismissed": dismissed}
 
 
+# ── Inbox AI classification (Phase 6d) ────────────────────────
+
+def _classify_one_inbox(inbox_row: dict, categories: list[str], owner: str) -> dict:
+    """Run AI classification on a single inbox row, with cache lookup/store.
+
+    Returns dict suitable to embed as `suggestion` next to the inbox item.
+    """
+    content = (inbox_row.get("content") or "").strip()
+    if not content:
+        return {"inbox_id": inbox_row.get("id"), "cached": False, **ai_service._empty_classify()}
+
+    src_hash = ai_service.content_hash(content)
+
+    cache = supabase.table("personal_ai_summaries") \
+        .select("id, payload") \
+        .eq("owner", owner) \
+        .eq("kind", ai_service.CLASSIFY_KIND) \
+        .eq("source_hash", src_hash) \
+        .order("created_at", desc=True).limit(1).execute()
+    if cache.data:
+        payload = cache.data[0].get("payload") or {}
+        sug = payload.get("suggestion") or ai_service._empty_classify()
+        return {"inbox_id": inbox_row.get("id"), "cached": True, **sug}
+
+    suggestion = ai_service.classify_inbox_item(content, categories)
+
+    supabase.table("personal_ai_summaries").insert({
+        "owner": owner,
+        "kind": ai_service.CLASSIFY_KIND,
+        "source_hash": src_hash,
+        "payload": {"suggestion": suggestion},
+    }).execute()
+
+    return {"inbox_id": inbox_row.get("id"), "cached": False, **suggestion}
+
+
+@app.post("/api/me/inbox/{inbox_id}/ai-classify")
+def ai_classify_inbox(inbox_id: int, user: dict = Depends(get_current_user)):
+    """단일 Inbox 항목 분류 — 제목/카테고리/우선순위/태그 제안."""
+    _require_ai()
+    owner = user["character_name"]
+    row = supabase.table("personal_inbox") \
+        .select("*").eq("id", inbox_id).eq("owner", owner).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Inbox 항목을 찾을 수 없습니다")
+    cats_rows = supabase.table("personal_categories") \
+        .select("name").eq("owner", owner).execute().data or []
+    cat_names = [c["name"] for c in cats_rows if c.get("name")]
+    try:
+        return _classify_one_inbox(row.data[0], cat_names, owner)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
+
+
+@app.post("/api/me/inbox/bulk-ai-classify")
+def ai_classify_inbox_bulk(user: dict = Depends(get_current_user)):
+    """미처리 Inbox 전체를 분류. 캐시된 건 모델 호출 없이 즉시 반환."""
+    _require_ai()
+    owner = user["character_name"]
+    items = supabase.table("personal_inbox") \
+        .select("*").eq("owner", owner).eq("processed", False) \
+        .order("created_at", desc=True).limit(50).execute().data or []
+    if not items:
+        return {"results": [], "total": 0}
+
+    cats_rows = supabase.table("personal_categories") \
+        .select("name").eq("owner", owner).execute().data or []
+    cat_names = [c["name"] for c in cats_rows if c.get("name")]
+
+    results = []
+    for it in items:
+        try:
+            results.append(_classify_one_inbox(it, cat_names, owner))
+        except Exception as e:
+            results.append({
+                "inbox_id": it.get("id"),
+                "error": str(e)[:200],
+                **ai_service._empty_classify(),
+            })
+    return {"results": results, "total": len(results)}
+
+
 @app.post("/api/me/search")
 def personal_search(req: PersonalSearchRequest, user: dict = Depends(get_current_user)):
     """자연어로 하루 로그 검색 + 답변 (Claude haiku)."""
