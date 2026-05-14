@@ -1866,3 +1866,242 @@ def get_personal_dashboard(user: dict = Depends(get_current_user)):
         "daily_logs": logs,
         "categories": categories,
     }
+
+
+# ════════════════════════════════════════════════════════
+# AI 정리 (Phase 5) — Claude haiku 호출
+# ════════════════════════════════════════════════════════
+
+import ai as ai_service
+
+
+class PromoteExtractRequest(BaseModel):
+    kind: Literal["tasks", "future"]
+    index: int
+    category: Optional[str] = None
+    project_id: Optional[int] = None
+    priority: Literal["high", "medium", "low"] = "medium"
+    due_date: Optional[str] = None  # YYYY-MM-DD
+
+
+class DismissExtractRequest(BaseModel):
+    kind: Literal["tasks", "future", "decisions"]
+    index: int
+
+
+class PersonalSearchRequest(BaseModel):
+    query: str
+    days: int = 90
+
+
+def _require_ai():
+    if not ai_service.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="AI 기능이 비활성 상태입니다. ANTHROPIC_API_KEY 가 설정되지 않았습니다.",
+        )
+
+
+@app.get("/api/me/ai/status")
+def ai_status():
+    """프런트가 AI 가능 여부를 확인하기 위한 경량 엔드포인트."""
+    return {"enabled": ai_service.is_enabled(), "model": ai_service.CLAUDE_MODEL}
+
+
+@app.post("/api/me/daily-logs/{log_date}/analyze")
+def analyze_daily_log(log_date: str, user: dict = Depends(get_current_user)):
+    """하루 로그를 분석해 할 일/미래/결정/태그 추출. 동일 내용은 캐시 재사용."""
+    _require_ai()
+    owner = user["character_name"]
+
+    log_result = supabase.table("personal_daily_logs") \
+        .select("*").eq("owner", owner).eq("log_date", log_date).execute()
+    if not log_result.data:
+        raise HTTPException(status_code=404, detail="해당 날짜 로그가 없습니다")
+    content = (log_result.data[0].get("content") or "").strip()
+    if not content:
+        return {
+            "status": "empty",
+            "cached": False,
+            "id": None,
+            "extract": {"tasks": [], "future": [], "decisions": [], "tags": []},
+            "promoted": [],
+            "dismissed": [],
+        }
+
+    src_hash = ai_service.content_hash(content)
+
+    cache = supabase.table("personal_ai_summaries") \
+        .select("*") \
+        .eq("owner", owner) \
+        .eq("kind", ai_service.EXTRACT_KIND) \
+        .eq("source_hash", src_hash) \
+        .order("created_at", desc=True).limit(1).execute()
+    if cache.data:
+        row = cache.data[0]
+        payload = row.get("payload") or {}
+        return {
+            "status": "ok",
+            "cached": True,
+            "id": row.get("id"),
+            "extract": payload.get("extract") or _empty_extract_obj(),
+            "promoted": payload.get("promoted", []),
+            "dismissed": payload.get("dismissed", []),
+        }
+
+    try:
+        extract = ai_service.extract_from_daily_log(content, log_date)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
+
+    payload = {
+        "extract": extract,
+        "log_date": log_date,
+        "promoted": [],
+        "dismissed": [],
+    }
+    inserted = supabase.table("personal_ai_summaries").insert({
+        "owner": owner,
+        "kind": ai_service.EXTRACT_KIND,
+        "source_hash": src_hash,
+        "payload": payload,
+    }).execute()
+    row = inserted.data[0] if inserted.data else {}
+    return {
+        "status": "ok",
+        "cached": False,
+        "id": row.get("id"),
+        "extract": extract,
+        "promoted": [],
+        "dismissed": [],
+    }
+
+
+def _empty_extract_obj() -> dict:
+    return {"tasks": [], "future": [], "decisions": [], "tags": []}
+
+
+@app.get("/api/me/daily-logs/{log_date}/extracts")
+def get_daily_extracts(log_date: str, user: dict = Depends(get_current_user)):
+    """해당 날짜 로그의 가장 최근 추출 결과. 없으면 빈 객체."""
+    owner = user["character_name"]
+    log_result = supabase.table("personal_daily_logs") \
+        .select("content").eq("owner", owner).eq("log_date", log_date).execute()
+    if not log_result.data or not (log_result.data[0].get("content") or "").strip():
+        return {"id": None, "extract": None, "promoted": [], "dismissed": []}
+    content = log_result.data[0]["content"]
+    src_hash = ai_service.content_hash(content)
+
+    cache = supabase.table("personal_ai_summaries") \
+        .select("*") \
+        .eq("owner", owner) \
+        .eq("kind", ai_service.EXTRACT_KIND) \
+        .eq("source_hash", src_hash) \
+        .order("created_at", desc=True).limit(1).execute()
+    if not cache.data:
+        return {"id": None, "extract": None, "promoted": [], "dismissed": []}
+    row = cache.data[0]
+    payload = row.get("payload") or {}
+    return {
+        "id": row.get("id"),
+        "extract": payload.get("extract"),
+        "promoted": payload.get("promoted", []),
+        "dismissed": payload.get("dismissed", []),
+        "created_at": row.get("created_at"),
+    }
+
+
+@app.post("/api/me/extracts/{eid}/promote")
+def promote_extract(eid: int, req: PromoteExtractRequest, user: dict = Depends(get_current_user)):
+    """추출된 항목 하나를 personal_tasks 로 승격."""
+    owner = user["character_name"]
+    row_result = supabase.table("personal_ai_summaries") \
+        .select("*").eq("owner", owner).eq("id", eid).execute()
+    if not row_result.data:
+        raise HTTPException(status_code=404, detail="추출 결과를 찾을 수 없습니다")
+    row = row_result.data[0]
+    payload = row.get("payload") or {}
+    extract = payload.get("extract") or {}
+    items = extract.get(req.kind, [])
+    if req.index < 0 or req.index >= len(items):
+        raise HTTPException(status_code=400, detail="인덱스가 범위를 벗어납니다")
+    item = items[req.index]
+    title = (item.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="빈 제목입니다")
+
+    log_date_hint = payload.get("log_date") or ""
+    task_row = {
+        "owner": owner,
+        "title": title,
+        "category": req.category,
+        "project_id": req.project_id,
+        "status": "todo",
+        "priority": req.priority,
+        "due_date": req.due_date,
+        "tags": [],
+        "notes": f"하루 로그({log_date_hint})에서 AI 가 추출",
+    }
+    insert_result = supabase.table("personal_tasks").insert(task_row).execute()
+    new_task = insert_result.data[0] if insert_result.data else None
+
+    key = f"{req.kind}:{req.index}"
+    promoted = list(payload.get("promoted", []) or [])
+    if key not in promoted:
+        promoted.append(key)
+    payload["promoted"] = promoted
+    supabase.table("personal_ai_summaries").update({"payload": payload}).eq("id", eid).execute()
+
+    return {"status": "ok", "task": new_task, "promoted": promoted}
+
+
+@app.post("/api/me/extracts/{eid}/dismiss")
+def dismiss_extract(eid: int, req: DismissExtractRequest, user: dict = Depends(get_current_user)):
+    owner = user["character_name"]
+    row_result = supabase.table("personal_ai_summaries") \
+        .select("*").eq("owner", owner).eq("id", eid).execute()
+    if not row_result.data:
+        raise HTTPException(status_code=404, detail="추출 결과를 찾을 수 없습니다")
+    payload = row_result.data[0].get("payload") or {}
+    key = f"{req.kind}:{req.index}"
+    dismissed = list(payload.get("dismissed", []) or [])
+    if key not in dismissed:
+        dismissed.append(key)
+    payload["dismissed"] = dismissed
+    supabase.table("personal_ai_summaries").update({"payload": payload}).eq("id", eid).execute()
+    return {"status": "ok", "dismissed": dismissed}
+
+
+@app.post("/api/me/search")
+def personal_search(req: PersonalSearchRequest, user: dict = Depends(get_current_user)):
+    """자연어로 하루 로그 검색 + 답변 (Claude haiku)."""
+    _require_ai()
+    owner = user["character_name"]
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="검색어를 입력해주세요")
+    if len(query) > 500:
+        raise HTTPException(status_code=400, detail="검색어가 너무 깁니다 (500자 이내)")
+
+    days = max(7, min(req.days or 90, 365))
+    start = (datetime.now().date() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    logs = supabase.table("personal_daily_logs") \
+        .select("log_date, content") \
+        .eq("owner", owner) \
+        .gte("log_date", start) \
+        .order("log_date", desc=True) \
+        .limit(180).execute().data or []
+
+    try:
+        result = ai_service.smart_search(query, logs)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
+
+    return {
+        "status": "ok",
+        "query": query,
+        "days": days,
+        "logs_searched": len(logs),
+        **result,
+    }
