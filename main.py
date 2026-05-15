@@ -1888,6 +1888,7 @@ class PromoteExtractRequest(BaseModel):
     project_id: Optional[int] = None
     priority: Literal["high", "medium", "low"] = "medium"
     due_date: Optional[str] = None  # YYYY-MM-DD
+    title_override: Optional[str] = None
 
 
 class DismissExtractRequest(BaseModel):
@@ -2032,7 +2033,8 @@ def promote_extract(eid: int, req: PromoteExtractRequest, user: dict = Depends(g
     if req.index < 0 or req.index >= len(items):
         raise HTTPException(status_code=400, detail="인덱스가 범위를 벗어납니다")
     item = items[req.index]
-    title = (item.get("title") or "").strip()
+    override = (req.title_override or "").strip()
+    title = override or (item.get("title") or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="빈 제목입니다")
 
