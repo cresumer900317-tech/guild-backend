@@ -1311,10 +1311,12 @@ class PersonalTaskCreate(BaseModel):
     title: str
     category: Optional[str] = None
     project_id: Optional[int] = None
+    parent_task_id: Optional[int] = None
     notes: Optional[str] = ""
     status: Optional[str] = "todo"
     priority: Optional[str] = "medium"
-    due_date: Optional[str] = None  # YYYY-MM-DD
+    start_date: Optional[str] = None  # YYYY-MM-DD
+    due_date: Optional[str] = None    # YYYY-MM-DD
     tags: Optional[list[str]] = None
     sort_order: Optional[int] = 0
 
@@ -1323,9 +1325,11 @@ class PersonalTaskUpdate(BaseModel):
     title: Optional[str] = None
     category: Optional[str] = None
     project_id: Optional[int] = None
+    parent_task_id: Optional[int] = None
     notes: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
+    start_date: Optional[str] = None
     due_date: Optional[str] = None
     tags: Optional[list[str]] = None
     sort_order: Optional[int] = None
@@ -1443,9 +1447,11 @@ def create_personal_task(req: PersonalTaskCreate, user: dict = Depends(get_curre
         "title": title,
         "category": req.category,
         "project_id": req.project_id,
+        "parent_task_id": req.parent_task_id if req.parent_task_id and req.parent_task_id > 0 else None,
         "notes": req.notes or "",
         "status": status,
         "priority": priority,
+        "start_date": req.start_date or None,
         "due_date": req.due_date or None,
         "tags": req.tags or [],
         "sort_order": req.sort_order or 0,
@@ -1492,6 +1498,10 @@ def update_personal_task(task_id: int, req: PersonalTaskUpdate, user: dict = Dep
         updates["priority"] = req.priority
     if req.due_date is not None:
         updates["due_date"] = req.due_date or None
+    if req.start_date is not None:
+        updates["start_date"] = req.start_date or None
+    if req.parent_task_id is not None:
+        updates["parent_task_id"] = req.parent_task_id if req.parent_task_id and req.parent_task_id > 0 else None
     if req.tags is not None:
         updates["tags"] = req.tags
     if req.sort_order is not None:
