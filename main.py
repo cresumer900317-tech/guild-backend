@@ -1315,8 +1315,10 @@ class PersonalTaskCreate(BaseModel):
     notes: Optional[str] = ""
     status: Optional[str] = "todo"
     priority: Optional[str] = "medium"
-    start_date: Optional[str] = None  # YYYY-MM-DD
-    due_date: Optional[str] = None    # YYYY-MM-DD
+    start_date: Optional[str] = None         # 계획 시작 YYYY-MM-DD
+    due_date: Optional[str] = None           # 계획 마감 YYYY-MM-DD
+    actual_start_date: Optional[str] = None  # 실제 시작
+    actual_end_date: Optional[str] = None    # 실제 완료
     tags: Optional[list[str]] = None
     sort_order: Optional[int] = 0
 
@@ -1331,6 +1333,8 @@ class PersonalTaskUpdate(BaseModel):
     priority: Optional[str] = None
     start_date: Optional[str] = None
     due_date: Optional[str] = None
+    actual_start_date: Optional[str] = None
+    actual_end_date: Optional[str] = None
     tags: Optional[list[str]] = None
     sort_order: Optional[int] = None
 
@@ -1453,11 +1457,15 @@ def create_personal_task(req: PersonalTaskCreate, user: dict = Depends(get_curre
         "priority": priority,
         "start_date": req.start_date or None,
         "due_date": req.due_date or None,
+        "actual_start_date": req.actual_start_date or None,
+        "actual_end_date": req.actual_end_date or None,
         "tags": req.tags or [],
         "sort_order": req.sort_order or 0,
     }
     if status == "done":
         row["completed_at"] = datetime.now().isoformat()
+        if not row["actual_end_date"]:
+            row["actual_end_date"] = datetime.now().date().isoformat()
     result = supabase.table("personal_tasks").insert(row).execute()
     return result.data[0] if result.data else {}
 
@@ -1488,10 +1496,17 @@ def update_personal_task(task_id: int, req: PersonalTaskUpdate, user: dict = Dep
         if req.status not in ALLOWED_TASK_STATUS:
             raise HTTPException(status_code=400, detail="잘못된 상태값입니다")
         updates["status"] = req.status
+        today_str = datetime.now().date().isoformat()
         if req.status == "done" and old["status"] != "done":
             updates["completed_at"] = datetime.now().isoformat()
+            # 완료 시 실제 완료일 자동 기록 (기존 값/명시 값이 있으면 유지)
+            if not old.get("actual_end_date") and req.actual_end_date is None:
+                updates["actual_end_date"] = today_str
         elif req.status != "done":
             updates["completed_at"] = None
+        # 진행 중 전환 시 실제 시작일 자동 기록
+        if req.status == "in_progress" and not old.get("actual_start_date") and req.actual_start_date is None:
+            updates["actual_start_date"] = today_str
     if req.priority is not None:
         if req.priority not in ALLOWED_TASK_PRIORITY:
             raise HTTPException(status_code=400, detail="잘못된 우선순위입니다")
@@ -1500,6 +1515,10 @@ def update_personal_task(task_id: int, req: PersonalTaskUpdate, user: dict = Dep
         updates["due_date"] = req.due_date or None
     if req.start_date is not None:
         updates["start_date"] = req.start_date or None
+    if req.actual_start_date is not None:
+        updates["actual_start_date"] = req.actual_start_date or None
+    if req.actual_end_date is not None:
+        updates["actual_end_date"] = req.actual_end_date or None
     if req.parent_task_id is not None:
         updates["parent_task_id"] = req.parent_task_id if req.parent_task_id and req.parent_task_id > 0 else None
     if req.tags is not None:
