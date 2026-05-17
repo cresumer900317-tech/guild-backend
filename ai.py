@@ -39,12 +39,14 @@ SEARCH_KIND = "search"
 CLASSIFY_KIND = "inbox_classify"
 BRIEFING_KIND = "dashboard_briefing"
 DAILY_TEMPLATE_KIND = "daily_template"
+RETRO_KIND = "project_retro"
 
 # personal_ai_usage 에 적재되는 kind 키. AI 호출이 실제 발생한 것만 기록.
 USAGE_KIND_EXTRACT = "daily_log_extract"
 USAGE_KIND_SEARCH = "search"
 USAGE_KIND_CLASSIFY = "inbox_classify"
 USAGE_KIND_BRIEFING = "briefing"
+USAGE_KIND_RETRO = "project_retro"
 
 
 def is_enabled() -> bool:
@@ -508,6 +510,61 @@ def daily_auto_template(today_str: str, completed_titles: list[str],
     lines.append("- 내일 우선: ")
 
     return "\n".join(lines)
+
+
+# ── 6) Project retrospective (S4) ──────────────────────────────────
+
+_RETRO_SYSTEM = (
+    "너는 프로젝트 회고를 도와주는 비서다. PM이 운영한 개인 프로젝트의 "
+    "작업 목록(계획 일정 vs 실제 일정, 완료 여부)을 보고 간결한 회고를 쓴다.\n\n"
+    "규칙:\n"
+    "1. 한국어 평어체. 따뜻하지만 솔직하게.\n"
+    "2. 정확히 세 부분으로 쓴다. 각 부분은 '## 제목' 한 줄 + 그 아래 '- ' 불릿 1~3개:\n"
+    "   ## 잘된 점\n"
+    "   ## 아쉬운 점\n"
+    "   ## 다음에 적용할 것\n"
+    "3. 계획 대비 실제가 밀린 작업(슬립)이 있으면 구체적으로 짚는다.\n"
+    "4. 데이터에 없는 내용은 지어내지 않는다. 작업이 적으면 짧게 쓴다.\n"
+    "5. 전체 12줄 이내. 군더더기 없이.\n"
+    "6. 마크다운 코드블록은 쓰지 않는다."
+)
+
+
+def project_retrospective(project: dict, tasks: list[dict],
+                          owner: str | None = None) -> str:
+    """프로젝트의 작업(계획 vs 실제)을 보고 회고문을 생성. 평문 텍스트 반환."""
+    name = str(project.get("name", "")).strip()
+    goal = str(project.get("description", "")).strip()
+    lines = [f"프로젝트: {name}"]
+    if goal:
+        lines.append(f"목표: {goal}")
+    if project.get("start_date") or project.get("end_date"):
+        lines.append(f"프로젝트 기간: {project.get('start_date') or '?'} ~ {project.get('end_date') or '?'}")
+    done = sum(1 for t in tasks if t.get("status") == "done")
+    lines.append(f"작업 현황: 총 {len(tasks)}개 중 {done}개 완료")
+    lines.append("")
+    lines.append("작업 목록 (상태 | 계획 시작~마감 | 실제 시작~완료):")
+    for t in tasks[:80]:
+        title = str(t.get("title", "")).strip()[:80]
+        st = t.get("status", "?")
+        plan = f"{t.get('start_date') or '?'}~{t.get('due_date') or '?'}"
+        actual = f"{t.get('actual_start_date') or '?'}~{t.get('actual_end_date') or '?'}"
+        lines.append(f"- [{st}] {title} | 계획 {plan} | 실제 {actual}")
+
+    user_prompt = "\n".join(lines) + "\n\n위 내용을 보고 프로젝트 회고를 작성해줘."
+    if len(user_prompt) > MAX_INPUT_CHARS:
+        user_prompt = user_prompt[:MAX_INPUT_CHARS]
+
+    msg = _client().messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=900,
+        system=_RETRO_SYSTEM,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    _log_usage("retro", msg)
+    if owner:
+        record_ai_usage(owner, USAGE_KIND_RETRO, msg)
+    return _collect_text(msg)[:2000]
 
 
 def _parse_search_json(raw: str) -> dict:

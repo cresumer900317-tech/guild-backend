@@ -2352,6 +2352,73 @@ def dashboard_briefing(force: bool = False, user: dict = Depends(get_current_use
     return {**base, "text": text, "ai_enabled": True, "cached": False}
 
 
+def _project_retro_signature(project: dict, tasks: list[dict]) -> str:
+    """프로젝트 + 작업(계획/실제 일정·상태) 상태의 해시 — 변경 없으면 캐시 재사용."""
+    parts = [
+        str(project.get("name")), str(project.get("description")),
+        str(project.get("status")), str(project.get("start_date")),
+        str(project.get("end_date")),
+    ]
+    for t in sorted(tasks, key=lambda x: x.get("id", 0)):
+        parts.append("|".join(str(t.get(k)) for k in (
+            "id", "title", "status", "start_date", "due_date",
+            "actual_start_date", "actual_end_date",
+        )))
+    return ai_service.content_hash("\n".join(parts))
+
+
+@app.post("/api/me/projects/{project_id}/retrospective")
+def project_retrospective(project_id: int, force: bool = False,
+                          user: dict = Depends(get_current_user)):
+    """프로젝트 AI 회고 — 계획 대비 실제 일정·완료율을 보고 회고문 생성.
+
+    같은 상태(작업 일정/상태 변화 없음)는 캐시 재사용. AI 비활성 시 graceful.
+    """
+    owner = user["character_name"]
+    proj = supabase.table("personal_projects") \
+        .select("*").eq("id", project_id).eq("owner", owner).execute()
+    if not proj.data:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+    project = proj.data[0]
+    all_tasks = supabase.table("personal_tasks").select("*") \
+        .eq("owner", owner).eq("project_id", project_id).execute().data or []
+    tasks = [t for t in all_tasks if not t.get("parent_task_id")]
+
+    if not ai_service.is_enabled():
+        return {"text": "", "ai_enabled": False, "cached": False}
+    if not tasks:
+        return {"text": "", "ai_enabled": True, "cached": False, "empty": True}
+
+    sig = _project_retro_signature(project, tasks)
+    if not force:
+        cache = supabase.table("personal_ai_summaries") \
+            .select("payload, created_at") \
+            .eq("owner", owner) \
+            .eq("kind", ai_service.RETRO_KIND) \
+            .eq("source_hash", sig) \
+            .order("created_at", desc=True).limit(1).execute()
+        if cache.data:
+            row = cache.data[0]
+            return {
+                "text": (row.get("payload") or {}).get("text") or "",
+                "ai_enabled": True, "cached": True,
+                "generated_at": row.get("created_at"),
+            }
+
+    try:
+        text = ai_service.project_retrospective(project, tasks, owner=owner)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 호출 실패: {str(e)[:200]}")
+
+    supabase.table("personal_ai_summaries").insert({
+        "owner": owner,
+        "kind": ai_service.RETRO_KIND,
+        "source_hash": sig,
+        "payload": {"text": text},
+    }).execute()
+    return {"text": text, "ai_enabled": True, "cached": False}
+
+
 @app.get("/api/me/daily-logs/{log_date}/auto-template")
 def daily_log_auto_template(log_date: str, user: dict = Depends(get_current_user)):
     """오늘 완료한 task / 오늘 마감 / 진행 중 프로젝트 기반 자동 초안 생성.
