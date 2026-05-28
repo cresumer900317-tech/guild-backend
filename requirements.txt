@@ -13,3 +13,5 @@ bcrypt
 PyJWT
 anthropic
 tzdata
+qrcode[pil]
+python-multipart

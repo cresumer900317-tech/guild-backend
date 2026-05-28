@@ -156,6 +156,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 결혼식 사진 업로드/갤러리
+from wedding import router as wedding_router, ensure_table as ensure_wedding_table  # noqa: E402
+app.include_router(wedding_router)
+try:
+    ensure_wedding_table()
+except Exception as _e:
+    print(f"[wedding] ensure_table skipped: {_e}")
+
 
 @app.get("/")
 def root():
