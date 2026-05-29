@@ -59,9 +59,33 @@ def ensure_table():
 
 
 # ── 업로드 ────────────────────────────────────────────
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif")
+VIDEO_EXTS = (".mp4", ".mov", ".webm", ".m4v")
+ALLOWED_EXTS = IMAGE_EXTS + VIDEO_EXTS
+
+# 확장자 → content-type (브라우저가 type 을 안 보낼 때 fallback)
+_CONTENT_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".webp": "image/webp", ".gif": "image/gif", ".heic": "image/heic", ".heif": "image/heif",
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/x-m4v",
+}
+
+
+def _max_upload_mb() -> int:
+    try:
+        return int(os.environ.get("WEDDING_MAX_UPLOAD_MB", "100"))
+    except ValueError:
+        return 100
+
+
+def _guess_content_type(filename: str) -> str:
+    ext = (os.path.splitext(filename or "")[1] or "").lower()
+    return _CONTENT_TYPES.get(ext, "application/octet-stream")
+
+
 def _gen_filename(orig_name: str) -> str:
     ext = (os.path.splitext(orig_name or "")[1] or ".jpg").lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"):
+    if ext not in ALLOWED_EXTS:
         ext = ".jpg"
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     rand = secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10]
@@ -84,8 +108,9 @@ async def upload_photo(
     size = len(content)
     if size <= 0:
         raise HTTPException(status_code=400, detail="빈 파일입니다")
-    if size > 20 * 1024 * 1024:  # 클라이언트가 압축해도 20MB 넘으면 거부
-        raise HTTPException(status_code=413, detail="파일이 너무 큽니다 (20MB 이하)")
+    max_mb = _max_upload_mb()
+    if size > max_mb * 1024 * 1024:  # 사진은 클라이언트 압축됨, 동영상은 원본 → 넉넉히
+        raise HTTPException(status_code=413, detail=f"파일이 너무 큽니다 ({max_mb}MB 이하)")
 
     filename = _gen_filename(file.filename or "")
     storage_path = filename  # bucket 루트에 평탄하게 저장
@@ -94,7 +119,7 @@ async def upload_photo(
     bucket = _bucket_name()
 
     # Storage 업로드 (REST API 직접 호출 — supabase-py 의 storage 인터페이스가 환경마다 차이가 있어 안전하게)
-    content_type = file.content_type or "image/jpeg"
+    content_type = file.content_type or _guess_content_type(filename)
     storage_upload_url = f"{sb_url}/storage/v1/object/{bucket}/{urllib.parse.quote(storage_path)}"
     try:
         with httpx.Client(timeout=60) as client:
