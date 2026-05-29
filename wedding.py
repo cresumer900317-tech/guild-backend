@@ -170,6 +170,30 @@ async def upload_photo(
     }
 
 
+# ── 공개 카운트 (라이브 카운터용, 인증 없음) ───────────
+@router.get("/count")
+def count_photos():
+    """모인 사진/영상 수 + 참여자(고유 uuid) 수. 숫자만 노출."""
+    try:
+        result = supabase.table("wedding_photos").select("filename, uploader_uuid").execute()
+        rows = result.data or []
+    except Exception:
+        return {"total": 0, "images": 0, "videos": 0, "contributors": 0}
+    videos = 0
+    for r in rows:
+        ext = (os.path.splitext(r.get("filename") or "")[1] or "").lower()
+        if ext in VIDEO_EXTS:
+            videos += 1
+    uuids = {(r.get("uploader_uuid") or "").strip() for r in rows}
+    uuids.discard("")
+    return {
+        "total": len(rows),
+        "images": len(rows) - videos,
+        "videos": videos,
+        "contributors": len(uuids),
+    }
+
+
 # ── 갤러리 (관리자) ────────────────────────────────────
 @router.get("/list")
 def list_photos(key: str = Query("")):
