@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, Literal
 import json
 import os
+import secrets as _secrets
 import jwt
 from pydantic import BaseModel, field_validator
 from fastapi import FastAPI, HTTPException, Depends, Header
@@ -12,7 +13,10 @@ from database import supabase
 from scheduler import start_scheduler
 from datetime import datetime, timedelta
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "changeme-dev-secret")
+# JWT_SECRET 미설정 시 공개 소스의 기본값으로 토큰이 위조되는 걸 막기 위해
+# 부팅마다 랜덤 시크릿 사용(fail-closed). 단 이 경우 재배포 때마다 전원 재로그인 필요 →
+# 운영에선 반드시 Railway 환경변수 JWT_SECRET 에 고정 강한 값을 설정할 것.
+JWT_SECRET = os.environ.get("JWT_SECRET") or _secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
 
@@ -151,7 +155,8 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r".*",
+    # 친구들.com(=xn--2e0br5l24w.com), *.github.io, localhost 만 허용 (이전엔 전면 개방 ".*").
+    allow_origin_regex=r"^https://(www\.)?xn--2e0br5l24w\.com$|^https://[a-z0-9-]+\.github\.io$|^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -622,8 +627,8 @@ def upsert_contribution(req: ContributionUpsert):
 
 
 @app.delete("/api/contributions")
-def delete_contribution(month: str, guild_name: str, member_name: str):
-    """공헌도 삭제"""
+def delete_contribution(month: str, guild_name: str, member_name: str, admin: dict = Depends(require_admin)):
+    """공헌도 삭제 (관리자)"""
     supabase.table("guild_contributions")        .delete()        .eq("month", month)        .eq("guild_name", guild_name)        .eq("member_name", member_name)        .execute()
     return {"status": "ok"}
 
@@ -722,7 +727,7 @@ def login(req: AuthRequest):
 
 
 @app.get("/api/auth/users")
-def get_users(status: str = None):
+def get_users(status: str = None, admin: dict = Depends(require_admin)):
     """유저 목록 조회 (어드민용)"""
     query = supabase.table("users").select("id,character_name,guild,status,role,created_at,approved_at")
     if status:
@@ -872,23 +877,13 @@ def get_profile(user: dict = Depends(get_current_user)):
     return result.data[0]
 
 
-@app.post("/api/auth/init-superadmin")
-def init_superadmin():
-    """슈퍼어드민 비밀번호 초기화 (일회용)"""
-    user = supabase.table("users").select("password_hash").eq("character_name", "친구닷").execute()
-    if not user.data:
-        raise HTTPException(status_code=404, detail="친구닷 계정을 찾을 수 없습니다")
-    # 이미 올바른 비밀번호가 설정되어 있으면 스킵
-    existing = user.data[0].get("password_hash", "")
-    if existing and bcrypt.checkpw(b"wedding260606", existing.encode()):
-        return {"status": "ok", "message": "이미 설정되어 있습니다"}
-    pw_hash = bcrypt.hashpw(b"wedding260606", bcrypt.gensalt()).decode()
-    supabase.table("users").update({"password_hash": pw_hash}).eq("character_name", "친구닷").execute()
-    return {"status": "ok", "message": "친구닷 비밀번호 초기화 완료"}
+# [보안] /api/auth/init-superadmin 제거됨 — 인증 없이 하드코딩 비번으로 슈퍼어드민을
+# 덮어쓸 수 있는 백도어였음. 슈퍼어드민 비번 재설정이 필요하면 관리자 로그인 후
+# /api/auth/reset-password(require_admin) 또는 DB에서 직접 처리할 것.
 
 @app.delete("/api/auth/users/{character_name}")
-def delete_user(character_name: str):
-    """유저 삭제"""
+def delete_user(character_name: str, admin: dict = Depends(require_admin)):
+    """유저 삭제 (관리자)"""
     supabase.table("users").delete().eq("character_name", character_name).execute()
     return {"status": "ok", "message": f"{character_name} 삭제 완료"}
 
@@ -978,7 +973,13 @@ def view_tip(tip_id: int):
     return {"views": current + 1}
 
 @app.delete("/api/tips/{tip_id}")
-def delete_tip(tip_id: int):
+def delete_tip(tip_id: int, user: dict = Depends(get_current_user)):
+    """본인 글이거나 관리자만 삭제 가능"""
+    row = supabase.table("tips").select("author").eq("id", tip_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    if row.data[0].get("author") != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
     supabase.table("tips").delete().eq("id", tip_id).execute()
     return {"status": "ok"}
 
@@ -1078,7 +1079,13 @@ def like_free_post(post_id: int):
     return {"likes": current + 1}
 
 @app.delete("/api/free/{post_id}")
-def delete_free_post(post_id: int):
+def delete_free_post(post_id: int, user: dict = Depends(get_current_user)):
+    """본인 글이거나 관리자만 삭제 가능"""
+    row = supabase.table("free_posts").select("author").eq("id", post_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    if row.data[0].get("author") != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
     supabase.table("free_posts").delete().eq("id", post_id).execute()
     return {"status": "ok"}
 

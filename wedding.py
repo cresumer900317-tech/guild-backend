@@ -8,13 +8,15 @@ from __future__ import annotations
 import io
 import os
 import secrets
+import time
 import urllib.parse
 import zipfile
+from collections import deque
 from datetime import datetime
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from database import supabase
@@ -25,7 +27,38 @@ router = APIRouter(prefix="/api/wedding", tags=["wedding"])
 
 # ── 설정 ──────────────────────────────────────────────
 def _admin_token() -> str:
-    return os.environ.get("WEDDING_ADMIN_TOKEN", "jepak1116").strip() or "jepak1116"
+    # 하드코딩 기본값 없음 — 환경변수 WEDDING_ADMIN_TOKEN 미설정 시 관리자 접근 전면 차단(fail-closed).
+    return os.environ.get("WEDDING_ADMIN_TOKEN", "").strip()
+
+
+# ── 업로드 레이트리밋 (스크립트 대량 업로드 방어) ──────
+# IP당 분당 허용 수. 0 이면 비활성. 예식장 단일 NAT(많은 하객이 같은 공인 IP)를
+# 고려해 기본값을 넉넉히. 하객이 막히면 값을 올리거나 0으로.
+_UPLOAD_HITS: dict[str, deque] = {}
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit_ok(ip: str) -> bool:
+    try:
+        limit = int(os.environ.get("WEDDING_UPLOAD_RATE_PER_MIN", "600"))
+    except ValueError:
+        limit = 600
+    if limit <= 0:
+        return True
+    now = time.monotonic()
+    dq = _UPLOAD_HITS.setdefault(ip, deque())
+    while dq and now - dq[0] > 60:
+        dq.popleft()
+    if len(dq) >= limit:
+        return False
+    dq.append(now)
+    return True
 
 
 def _bucket_name() -> str:
@@ -41,7 +74,8 @@ def _supabase_creds() -> tuple[str, str]:
 
 
 def _check_admin(key: Optional[str]):
-    if not key or key.strip() != _admin_token():
+    tok = _admin_token()
+    if not tok or not key or key.strip() != tok:
         raise HTTPException(status_code=403, detail="비공개 페이지입니다")
 
 
@@ -94,13 +128,16 @@ def _gen_filename(orig_name: str) -> str:
 
 @router.post("/upload")
 async def upload_photo(
+    request: Request,
     file: UploadFile = File(...),
     uploader_name: str = Form(""),
     uploader_uuid: str = Form(""),
     width: int = Form(0),
     height: int = Form(0),
 ):
-    """누구나 사진 업로드 (인증 없음)."""
+    """누구나 사진 업로드 (인증 없음). IP당 분당 한도로 대량 업로드 방어."""
+    if not _rate_limit_ok(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="업로드 요청이 너무 많아요. 잠시 후 다시 시도해 주세요")
     if not file:
         raise HTTPException(status_code=400, detail="파일이 없습니다")
 
@@ -119,7 +156,9 @@ async def upload_photo(
     bucket = _bucket_name()
 
     # Storage 업로드 (REST API 직접 호출 — supabase-py 의 storage 인터페이스가 환경마다 차이가 있어 안전하게)
-    content_type = file.content_type or _guess_content_type(filename)
+    # content-type 은 클라이언트가 보낸 값을 믿지 않고 '정제된 확장자'에서만 도출.
+    # (안 그러면 text/html 등으로 공개 버킷에 임의 웹페이지/스크립트를 호스팅하는 악용 가능)
+    content_type = _guess_content_type(filename)
     storage_upload_url = f"{sb_url}/storage/v1/object/{bucket}/{urllib.parse.quote(storage_path)}"
     try:
         with httpx.Client(timeout=60) as client:
