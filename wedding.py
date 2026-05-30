@@ -213,14 +213,25 @@ def list_photos(key: str = Query("")):
 
 
 @router.delete("/{photo_id}")
-def delete_photo(photo_id: int, key: str = Query("")):
-    _check_admin(key)
+def delete_photo(photo_id: int, key: str = Query(""), uuid: str = Query("")):
+    """사진 삭제.
 
+    인증은 둘 중 하나:
+      - admin 토큰(key) — 신랑·신부 갤러리
+      - 본인 업로더 uuid(uuid) — 하객이 방금 올린 자기 사진 '회수'
+    """
     result = supabase.table("wedding_photos").select("*").eq("id", photo_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="없는 사진")
 
     photo = result.data[0]
+
+    # 권한 확인: admin 토큰 또는 본인 uuid 일치
+    is_admin = bool(key) and key.strip() == _admin_token()
+    owner_uuid = (photo.get("uploader_uuid") or "").strip()
+    is_owner = bool(uuid) and owner_uuid != "" and uuid.strip() == owner_uuid
+    if not (is_admin or is_owner):
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
     storage_path = photo.get("storage_path") or photo.get("filename")
     sb_url, sb_key = _supabase_creds()
     bucket = _bucket_name()
