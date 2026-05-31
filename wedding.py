@@ -17,7 +17,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from database import supabase
 
@@ -207,6 +207,25 @@ async def upload_photo(
         "url": public_url,
         "filename": filename,
     }
+
+
+# ── 딥 헬스체크 (모니터링용, 인증 없음) ────────────────
+@router.get("/health")
+def deep_health():
+    """업로드 경로의 핵심 의존성(DB)까지 실제로 확인.
+
+    - DB 연결 OK  → 200 {"ok": true}
+    - DB 연결 실패 → 503 {"ok": false}  (UptimeRobot 등이 '다운'으로 감지)
+    얕은 /healthz 와 달리 Supabase 가 죽으면 여기서 503 이 떠서 알림이 의미를 가짐.
+    """
+    try:
+        supabase.table("wedding_photos").select("id").limit(1).execute()
+        return JSONResponse(status_code=200, content={"ok": True, "db": True, "service": "wedding"})
+    except Exception as e:
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "db": False, "service": "wedding", "error": str(e)[:120]},
+        )
 
 
 # ── 공개 카운트 (라이브 카운터용, 인증 없음) ───────────
