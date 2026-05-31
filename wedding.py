@@ -210,7 +210,9 @@ async def upload_photo(
 
 
 # ── 딥 헬스체크 (모니터링용, 인증 없음) ────────────────
-@router.get("/health")
+# GET + HEAD 둘 다 허용: UptimeRobot 무료 플랜은 기본 HEAD 로 찔러보는데
+# GET 전용이면 405(Method Not Allowed)가 떠서 멀쩡한데도 '다운'으로 오인됨.
+@router.api_route("/health", methods=["GET", "HEAD"])
 def deep_health():
     """업로드 경로의 핵심 의존성(DB)까지 실제로 확인.
 
