@@ -107,7 +107,7 @@ _CONTENT_TYPES = {
 
 def _max_upload_mb() -> int:
     try:
-        return int(os.environ.get("WEDDING_MAX_UPLOAD_MB", "100"))
+        return int(os.environ.get("WEDDING_MAX_UPLOAD_MB", "200"))
     except ValueError:
         return 100
 
