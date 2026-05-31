@@ -155,8 +155,8 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    # 친구들.com(=xn--2e0br5l24w.com), *.github.io, localhost 만 허용 (이전엔 전면 개방 ".*").
-    allow_origin_regex=r"^https://(www\.)?xn--2e0br5l24w\.com$|^https://[a-z0-9-]+\.github\.io$|^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    # 친구들.com(=xn--2e0br5l24w.com), jisoar.com(개인 브랜드·/hq 개인업무앱 이전), *.github.io, localhost 만 허용.
+    allow_origin_regex=r"^https://(www\.)?xn--2e0br5l24w\.com$|^https://(www\.)?jisoar\.com$|^https://[a-z0-9-]+\.github\.io$|^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
