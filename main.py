@@ -916,8 +916,10 @@ def delete_notice(notice_id: int, admin: dict = Depends(require_admin)):
 # ── 꿀팁 API ──────────────────────────────────────────────────
 
 @app.get("/api/tips")
-def get_tips(category: str = None):
-    query = supabase.table("tips").select("*").order("created_at", desc=True)
+def get_tips(category: str = None, summary: bool = False):
+    # summary=true 면 본문(content) 제외하고 목록용 가벼운 컬럼만 반환 (모바일 앱 목록 속도용).
+    cols = "id,title,author,author_guild,likes,views,created_at,category" if summary else "*"
+    query = supabase.table("tips").select(cols).order("created_at", desc=True)
     if category:
         query = query.eq("category", category)
     result = query.execute()
@@ -1019,8 +1021,10 @@ def add_temp_member(req: TempMemberCreate, admin: dict = Depends(require_admin))
 # ── 자유게시판 API ──────────────────────────────────────────────
 
 @app.get("/api/free")
-def get_free_posts():
-    result = supabase.table("free_posts").select("*").order("created_at", desc=True).execute()
+def get_free_posts(summary: bool = False):
+    # summary=true 면 본문(content) 제외 (모바일 앱 목록 속도용). 기존 웹은 기본값(전체) 그대로.
+    cols = "id,title,author,author_guild,likes,views,created_at" if summary else "*"
+    result = supabase.table("free_posts").select(cols).order("created_at", desc=True).execute()
     return result.data or []
 
 @app.get("/api/free/{post_id}")
