@@ -4,7 +4,7 @@ import json
 import os
 import secrets as _secrets
 import jwt
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +12,7 @@ import bcrypt
 from database import supabase
 from scheduler import start_scheduler
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 # JWT_SECRET 미설정 시 공개 소스의 기본값으로 토큰이 위조되는 걸 막기 위해
 # 부팅마다 랜덤 시크릿 사용(fail-closed). 단 이 경우 재배포 때마다 전원 재로그인 필요 →
@@ -2667,3 +2668,163 @@ def preview_digest(user: dict = Depends(get_current_user)):
     from fastapi.responses import HTMLResponse
     digest = build_digest(user["character_name"])
     return HTMLResponse(content=digest["html"])
+
+
+# ── 콘텐츠 일정 API ───────────────────────────────────────────
+# 설계: guild-app-54/docs/일정_백엔드화_설계.md
+# 게임 시각은 전부 KST. Railway는 UTC라 반드시 KST로 계산/저장.
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _norm_kst(iso: str) -> str:
+    """ISO 문자열을 tz-aware로 정규화. 오프셋 없으면 KST로 간주(운영진 wall-clock 입력 방어)."""
+    try:
+        dt = datetime.fromisoformat(iso.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"잘못된 날짜 형식: {iso}")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=KST)
+    return dt.isoformat()
+
+
+def _expand_rule(rule: dict, window_start: datetime, window_end: datetime):
+    """상시 콘텐츠 주간 규칙을 [window_start, window_end] 구간 회차로 펼친다.
+    rule.weekday 는 JS getDay 컨벤션(0=일..6=토). Python weekday()는 0=월..6=일 → 변환."""
+    try:
+        target = (int(rule["weekday"]) + 6) % 7  # JS getDay → Python weekday()
+        dur = timedelta(minutes=int(rule.get("durationMin", 0)))
+        hour = int(rule.get("hour", 0)); minute = int(rule.get("min", 0))
+    except (KeyError, TypeError, ValueError):
+        return []
+    # window_start 1주 전의 target 요일부터 시작 → 진행 중인 회차도 포함
+    base = (window_start - timedelta(days=7)).astimezone(KST).replace(
+        hour=hour, minute=minute, second=0, microsecond=0)
+    base = base + timedelta(days=(target - base.weekday()) % 7)
+    out = []
+    cur = base
+    while cur <= window_end:
+        start, end = cur, cur + dur
+        if end >= window_start:  # 진행 중 + 미래만
+            out.append((start, end))
+        cur = cur + timedelta(days=7)
+    return out
+
+
+@app.get("/api/schedule")
+def get_schedule(weeks: int = 6):
+    """앱 홈/일정 화면용. 상시(규칙 펼침) + 시즌(occurrences) 병합해 회차 리스트 반환(camelCase).
+    비로그인 허용. id: 시즌=int, 상시=합성문자열(content@start)."""
+    weeks = max(1, min(weeks, 26))
+    now = datetime.now(KST)
+    window_start = now - timedelta(days=7)
+    window_end = now + timedelta(weeks=weeks)
+
+    contents = (supabase.table("contents").select("*")
+                .eq("active", True).order("sort_order").execute().data) or []
+    meta = {c["id"]: c for c in contents}
+
+    items = []
+    # ① 상시: 규칙으로 펼침
+    for c in contents:
+        if c.get("type") == "always" and c.get("recurrence"):
+            for start, end in _expand_rule(c["recurrence"], window_start, window_end):
+                items.append({
+                    "id": f"{c['id']}@{start.isoformat()}",
+                    "contentId": c["id"], "name": c["name"], "icon": c["icon"],
+                    "type": "always", "roundLabel": None,
+                    "startAt": start.isoformat(), "endAt": end.isoformat(),
+                })
+
+    # ② 시즌: occurrences 테이블 (구간 겹치는 것만)
+    occ = (supabase.table("occurrences").select("*")
+           .gte("end_at", window_start.isoformat())
+           .lte("start_at", window_end.isoformat())
+           .order("start_at").execute().data) or []
+    for o in occ:
+        c = meta.get(o["content_id"])
+        if not c:
+            continue
+        items.append({
+            "id": o["id"],
+            "contentId": o["content_id"], "name": c["name"], "icon": c["icon"],
+            "type": c["type"], "roundLabel": o.get("round_label"),
+            "startAt": o["start_at"], "endAt": o["end_at"],
+        })
+
+    items.sort(key=lambda x: x["startAt"])
+    return items
+
+
+# ── 운영진: 시즌 회차 관리 ────────────────────────────────────
+
+class OccurrenceIn(BaseModel):
+    content_id: str = Field(alias="contentId")
+    round_label: Optional[str] = Field(default=None, alias="roundLabel")
+    start_at: str = Field(alias="startAt")
+    end_at: str = Field(alias="endAt")
+    model_config = {"populate_by_name": True}
+
+
+class OccurrencePatch(BaseModel):
+    round_label: Optional[str] = Field(default=None, alias="roundLabel")
+    start_at: Optional[str] = Field(default=None, alias="startAt")
+    end_at: Optional[str] = Field(default=None, alias="endAt")
+    model_config = {"populate_by_name": True}
+
+
+@app.get("/api/admin/contents")
+def admin_list_contents(admin: dict = Depends(require_admin)):
+    """운영진 입력 화면용 콘텐츠 메타 목록(전체). snake_case 그대로."""
+    return (supabase.table("contents").select("*").order("sort_order").execute().data) or []
+
+
+@app.post("/api/admin/occurrences")
+def admin_create_occurrences(items: list[OccurrenceIn], admin: dict = Depends(require_admin)):
+    """시즌 회차 등록. 한 시즌(여러 회차)을 배열로 한 번에. 상시(always) 콘텐츠엔 등록 불가."""
+    if not items:
+        raise HTTPException(status_code=400, detail="등록할 회차가 없습니다")
+    contents = {c["id"]: c for c in
+                (supabase.table("contents").select("id,type").execute().data or [])}
+    rows = []
+    for it in items:
+        c = contents.get(it.content_id)
+        if not c:
+            raise HTTPException(status_code=400, detail=f"없는 콘텐츠: {it.content_id}")
+        if c["type"] != "season":
+            raise HTTPException(status_code=400, detail=f"상시 콘텐츠({it.content_id})는 회차 등록 대상이 아닙니다")
+        start, end = _norm_kst(it.start_at), _norm_kst(it.end_at)
+        if start >= end:
+            raise HTTPException(status_code=400, detail="시작 시각이 종료 시각보다 빠를 수 없습니다")
+        rows.append({
+            "content_id": it.content_id, "round_label": it.round_label,
+            "start_at": start, "end_at": end,
+        })
+    result = supabase.table("occurrences").insert(rows).execute()
+    return {"status": "ok", "inserted": len(result.data or []), "rows": result.data or []}
+
+
+@app.patch("/api/admin/occurrences/{occ_id}")
+def admin_update_occurrence(occ_id: int, req: OccurrencePatch, admin: dict = Depends(require_admin)):
+    """시즌 회차 수정(부분)."""
+    patch = {}
+    if req.round_label is not None:
+        patch["round_label"] = req.round_label
+    if req.start_at is not None:
+        patch["start_at"] = _norm_kst(req.start_at)
+    if req.end_at is not None:
+        patch["end_at"] = _norm_kst(req.end_at)
+    if not patch:
+        raise HTTPException(status_code=400, detail="수정할 내용이 없습니다")
+    if "start_at" in patch and "end_at" in patch and patch["start_at"] >= patch["end_at"]:
+        raise HTTPException(status_code=400, detail="시작 시각이 종료 시각보다 빠를 수 없습니다")
+    result = supabase.table("occurrences").update(patch).eq("id", occ_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="해당 회차를 찾을 수 없습니다")
+    return result.data[0]
+
+
+@app.delete("/api/admin/occurrences/{occ_id}")
+def admin_delete_occurrence(occ_id: int, admin: dict = Depends(require_admin)):
+    """시즌 회차 삭제."""
+    supabase.table("occurrences").delete().eq("id", occ_id).execute()
+    return {"status": "ok"}
