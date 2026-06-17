@@ -92,13 +92,15 @@ def _toggle_like(board: str, table: str, post_id: int, user: Optional[dict]) -> 
                 .limit(1).execute().data)
     if existing:  # 이미 누름 → 취소
         supabase.table("post_likes").delete().eq("board", board).eq("post_id", post_id)            .eq("character_name", name).execute()
-        new = max(0, current - 1)
         liked = False
     else:  # 새 좋아요
         supabase.table("post_likes").insert(
             {"board": board, "post_id": post_id, "character_name": name}).execute()
-        new = current + 1
         liked = True
+    # likes = 실제 누른 사람 수로 재계산 → ±1 누적 드리프트 불가, 기존 어긋난 값도 자동 교정
+    cnt = (supabase.table("post_likes").select("id", count="exact")
+           .eq("board", board).eq("post_id", post_id).execute())
+    new = cnt.count or 0
     supabase.table(table).update({"likes": new}).eq("id", post_id).execute()
     return {"likes": new, "liked": liked}
 
