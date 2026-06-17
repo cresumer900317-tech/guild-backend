@@ -53,6 +53,56 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     return current_user
 
 
+def get_optional_user(authorization: str = Header(None)) -> Optional[dict]:
+    """인증 선택적 — 토큰 있으면 유저, 없거나 무효면 None(예외 안 던짐). 좋아요/상세에 사용."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    try:
+        payload = jwt.decode(authorization.split(" ", 1)[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"character_name": payload["sub"], "role": payload.get("role", "member")}
+    except Exception:
+        return None
+
+
+def _did_like(board: str, post_id: int, name: Optional[str]) -> bool:
+    """해당 유저가 이 글에 좋아요 했는지."""
+    if not name:
+        return False
+    r = (supabase.table("post_likes").select("id")
+         .eq("board", board).eq("post_id", post_id).eq("character_name", name)
+         .limit(1).execute().data)
+    return bool(r)
+
+
+def _toggle_like(board: str, table: str, post_id: int, user: Optional[dict]) -> dict:
+    """좋아요 토글. 로그인 유저면 1인1좋아요 토글(post_likes 기록), 비로그인(웹 하위호환)이면 단순 +1.
+    반환: {likes, liked}."""
+    row = supabase.table(table).select("likes").eq("id", post_id).execute().data
+    if not row:
+        raise HTTPException(status_code=404, detail="없는 게시글")
+    current = row[0]["likes"] or 0
+
+    if not user:  # 비로그인(웹 등) — 기존 동작 유지
+        supabase.table(table).update({"likes": current + 1}).eq("id", post_id).execute()
+        return {"likes": current + 1, "liked": False}
+
+    name = user["character_name"]
+    existing = (supabase.table("post_likes").select("id")
+                .eq("board", board).eq("post_id", post_id).eq("character_name", name)
+                .limit(1).execute().data)
+    if existing:  # 이미 누름 → 취소
+        supabase.table("post_likes").delete().eq("board", board).eq("post_id", post_id)            .eq("character_name", name).execute()
+        new = max(0, current - 1)
+        liked = False
+    else:  # 새 좋아요
+        supabase.table("post_likes").insert(
+            {"board": board, "post_id": post_id, "character_name": name}).execute()
+        new = current + 1
+        liked = True
+    supabase.table(table).update({"likes": new}).eq("id", post_id).execute()
+    return {"likes": new, "liked": liked}
+
+
 # ── Pydantic 요청 모델 ────────────────────────────────────────
 
 class AuthRequest(BaseModel):
@@ -942,11 +992,13 @@ def create_tip(req: TipCreate):
     return result.data[0] if result.data else {}
 
 @app.get("/api/tips/{tip_id}")
-def get_tip(tip_id: int):
+def get_tip(tip_id: int, user: Optional[dict] = Depends(get_optional_user)):
     result = supabase.table("tips").select("*").eq("id", tip_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="없는 게시글")
-    return result.data[0]
+    post = result.data[0]
+    post["liked"] = _did_like("tip", tip_id, user["character_name"] if user else None)
+    return post
 
 @app.get("/api/tips/{tip_id}/adjacent")
 def get_adjacent_tips(tip_id: int):
@@ -959,13 +1011,8 @@ def get_adjacent_tips(tip_id: int):
     }
 
 @app.post("/api/tips/{tip_id}/like")
-def like_tip(tip_id: int):
-    result = supabase.table("tips").select("likes").eq("id", tip_id).execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="없는 게시글")
-    current = result.data[0]["likes"] or 0
-    supabase.table("tips").update({"likes": current + 1}).eq("id", tip_id).execute()
-    return {"likes": current + 1}
+def like_tip(tip_id: int, user: Optional[dict] = Depends(get_optional_user)):
+    return _toggle_like("tip", "tips", tip_id, user)
 
 @app.post("/api/tips/{tip_id}/view")
 def view_tip(tip_id: int):
@@ -1030,11 +1077,13 @@ def get_free_posts(summary: bool = False):
     return result.data or []
 
 @app.get("/api/free/{post_id}")
-def get_free_post(post_id: int):
+def get_free_post(post_id: int, user: Optional[dict] = Depends(get_optional_user)):
     result = supabase.table("free_posts").select("*").eq("id", post_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="없는 게시글")
-    return result.data[0]
+    post = result.data[0]
+    post["liked"] = _did_like("free", post_id, user["character_name"] if user else None)
+    return post
 
 @app.get("/api/free/{post_id}/adjacent")
 def get_free_adjacent(post_id: int):
@@ -1076,13 +1125,8 @@ def create_free_post(payload: dict):
     return result.data[0] if result.data else {}
 
 @app.post("/api/free/{post_id}/like")
-def like_free_post(post_id: int):
-    result = supabase.table("free_posts").select("likes").eq("id", post_id).execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="없는 게시글")
-    current = result.data[0]["likes"] or 0
-    supabase.table("free_posts").update({"likes": current + 1}).eq("id", post_id).execute()
-    return {"likes": current + 1}
+def like_free_post(post_id: int, user: Optional[dict] = Depends(get_optional_user)):
+    return _toggle_like("free", "free_posts", post_id, user)
 
 @app.delete("/api/free/{post_id}")
 def delete_free_post(post_id: int, user: dict = Depends(get_current_user)):
