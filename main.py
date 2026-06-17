@@ -9,9 +9,11 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
+from fastapi.responses import HTMLResponse
 from database import supabase
 from scheduler import start_scheduler
 from schedule_logic import KST, build_schedule
+from static_pages import PRIVACY_HTML, SUPPORT_HTML
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -227,6 +229,18 @@ except Exception as _e:
 @app.get("/")
 def root():
     return {"status": "ok", "message": "친구패밀리 백엔드 작동 중!", "version": "2026-04-15-v3"}
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_page():
+    """앱스토어 제출용 개인정보처리방침."""
+    return HTMLResponse(content=PRIVACY_HTML)
+
+
+@app.get("/support", response_class=HTMLResponse)
+def support_page():
+    """앱스토어 제출용 지원 페이지."""
+    return HTMLResponse(content=SUPPORT_HTML)
 
 
 @app.get("/healthz")
