@@ -942,6 +942,16 @@ def delete_user(character_name: str, admin: dict = Depends(require_admin)):
     return {"status": "ok", "message": f"{character_name} 삭제 완료"}
 
 
+@app.delete("/api/auth/me")
+def delete_my_account(user: dict = Depends(get_current_user)):
+    """본인 계정 탈퇴 (App Store 가이드라인 5.1.1 — 인앱 계정 삭제 의무).
+    유저 행 + 본인 푸시 토큰 정리. 게시글/좋아요는 보존(작성자명만 남음)."""
+    name = user["character_name"]
+    supabase.table("push_tokens").delete().eq("character_name", name).execute()
+    supabase.table("users").delete().eq("character_name", name).execute()
+    return {"status": "ok"}
+
+
 # ── 공지사항 API ──────────────────────────────────────────────
 
 @app.get("/api/notices")
