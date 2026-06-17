@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse
 from database import supabase
 from scheduler import start_scheduler
 from schedule_logic import KST, build_schedule
-from static_pages import PRIVACY_HTML, SUPPORT_HTML
+from static_pages import PRIVACY_HTML, SUPPORT_HTML, TERMS_HTML
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -241,6 +241,12 @@ def privacy_page():
 def support_page():
     """앱스토어 제출용 지원 페이지."""
     return HTMLResponse(content=SUPPORT_HTML)
+
+
+@app.get("/terms", response_class=HTMLResponse)
+def terms_page():
+    """이용약관 (UGC 무관용 조항 포함)."""
+    return HTMLResponse(content=TERMS_HTML)
 
 
 @app.get("/healthz")
