@@ -966,6 +966,60 @@ def delete_my_account(user: dict = Depends(get_current_user)):
     return {"status": "ok"}
 
 
+# ── UGC 신고/차단 (App Store 가이드라인 1.2) ─────────────────────
+
+class ReportBody(BaseModel):
+    target_type: str = Field(alias="targetType")  # post | comment | user
+    board: Optional[str] = None                     # tip | free
+    target_id: Optional[str] = Field(default=None, alias="targetId")
+    reason: Optional[str] = None
+    model_config = {"populate_by_name": True}
+
+
+class BlockBody(BaseModel):
+    blocked: str
+
+
+@app.post("/api/reports")
+def create_report(body: ReportBody, user: dict = Depends(get_current_user)):
+    """부적절 콘텐츠/이용자 신고 접수. 운영진이 reports 테이블에서 검토."""
+    supabase.table("reports").insert({
+        "reporter": user["character_name"],
+        "target_type": body.target_type,
+        "board": body.board,
+        "target_id": str(body.target_id) if body.target_id is not None else None,
+        "reason": body.reason,
+        "status": "open",
+    }).execute()
+    return {"status": "ok"}
+
+
+@app.post("/api/blocks")
+def block_user(body: BlockBody, user: dict = Depends(get_current_user)):
+    """사용자 차단 — 차단 대상의 글/댓글이 차단한 사람에게 보이지 않게 됨."""
+    name = user["character_name"]
+    if body.blocked == name:
+        raise HTTPException(status_code=400, detail="자기 자신은 차단할 수 없습니다")
+    supabase.table("blocks").upsert(
+        {"blocker": name, "blocked": body.blocked}, on_conflict="blocker,blocked").execute()
+    return {"status": "ok"}
+
+
+@app.delete("/api/blocks/{blocked}")
+def unblock_user(blocked: str, user: dict = Depends(get_current_user)):
+    """차단 해제."""
+    supabase.table("blocks").delete()        .eq("blocker", user["character_name"]).eq("blocked", blocked).execute()
+    return {"status": "ok"}
+
+
+@app.get("/api/blocks")
+def list_blocks(user: dict = Depends(get_current_user)):
+    """내가 차단한 캐릭터명 목록."""
+    rows = (supabase.table("blocks").select("blocked")
+            .eq("blocker", user["character_name"]).execute().data) or []
+    return [r["blocked"] for r in rows]
+
+
 # ── 공지사항 API ──────────────────────────────────────────────
 
 @app.get("/api/notices")
