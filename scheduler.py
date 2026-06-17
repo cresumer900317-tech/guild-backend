@@ -246,6 +246,14 @@ def start_scheduler():
     except Exception as e:
         logger.error(f"디지스트 잡 등록 실패: {e}")
 
+    # 5분마다 일정 푸시 (시작/마지막날/마감3h·1h, 중복은 push_log로 방지)
+    try:
+        from push_send import run_schedule_push
+        scheduler.add_job(run_schedule_push, IntervalTrigger(minutes=5))
+        logger.info("일정 푸시 잡 등록 완료 (5분 간격)")
+    except Exception as e:
+        logger.error(f"일정 푸시 잡 등록 실패: {e}")
+
     scheduler.start()
-    logger.info("스케줄러 시작 (1시간마다 크롤링, 매달 1일 00:05 스냅샷, 매일 08:00 KST 디지스트)")
+    logger.info("스케줄러 시작 (1시간마다 크롤링, 매달 1일 00:05 스냅샷, 매일 08:00 KST 디지스트, 5분마다 일정푸시)")
     return scheduler

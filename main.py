@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
 from database import supabase
 from scheduler import start_scheduler
+from schedule_logic import KST, build_schedule
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -2673,7 +2674,7 @@ def preview_digest(user: dict = Depends(get_current_user)):
 # ── 콘텐츠 일정 API ───────────────────────────────────────────
 # 설계: guild-app-54/docs/일정_백엔드화_설계.md
 # 게임 시각은 전부 KST. Railway는 UTC라 반드시 KST로 계산/저장.
-KST = ZoneInfo("Asia/Seoul")
+# KST / 일정 빌드 로직(_expand_rule, build_schedule)은 schedule_logic.py 로 분리 — 일정 푸시와 공용.
 
 
 def _norm_kst(iso: str) -> str:
@@ -2687,72 +2688,12 @@ def _norm_kst(iso: str) -> str:
     return dt.isoformat()
 
 
-def _expand_rule(rule: dict, window_start: datetime, window_end: datetime):
-    """상시 콘텐츠 주간 규칙을 [window_start, window_end] 구간 회차로 펼친다.
-    rule.weekday 는 JS getDay 컨벤션(0=일..6=토). Python weekday()는 0=월..6=일 → 변환."""
-    try:
-        target = (int(rule["weekday"]) + 6) % 7  # JS getDay → Python weekday()
-        dur = timedelta(minutes=int(rule.get("durationMin", 0)))
-        hour = int(rule.get("hour", 0)); minute = int(rule.get("min", 0))
-    except (KeyError, TypeError, ValueError):
-        return []
-    # window_start 1주 전의 target 요일부터 시작 → 진행 중인 회차도 포함
-    base = (window_start - timedelta(days=7)).astimezone(KST).replace(
-        hour=hour, minute=minute, second=0, microsecond=0)
-    base = base + timedelta(days=(target - base.weekday()) % 7)
-    out = []
-    cur = base
-    while cur <= window_end:
-        start, end = cur, cur + dur
-        if end >= window_start:  # 진행 중 + 미래만
-            out.append((start, end))
-        cur = cur + timedelta(days=7)
-    return out
-
-
 @app.get("/api/schedule")
 def get_schedule(weeks: int = 6):
     """앱 홈/일정 화면용. 상시(규칙 펼침) + 시즌(occurrences) 병합해 회차 리스트 반환(camelCase).
-    비로그인 허용. id: 시즌=int, 상시=합성문자열(content@start)."""
-    weeks = max(1, min(weeks, 26))
-    now = datetime.now(KST)
-    window_start = now - timedelta(days=7)
-    window_end = now + timedelta(weeks=weeks)
-
-    contents = (supabase.table("contents").select("*")
-                .eq("active", True).order("sort_order").execute().data) or []
-    meta = {c["id"]: c for c in contents}
-
-    items = []
-    # ① 상시: 규칙으로 펼침
-    for c in contents:
-        if c.get("type") == "always" and c.get("recurrence"):
-            for start, end in _expand_rule(c["recurrence"], window_start, window_end):
-                items.append({
-                    "id": f"{c['id']}@{start.isoformat()}",
-                    "contentId": c["id"], "name": c["name"], "icon": c["icon"],
-                    "type": "always", "roundLabel": None,
-                    "startAt": start.isoformat(), "endAt": end.isoformat(),
-                })
-
-    # ② 시즌: occurrences 테이블 (구간 겹치는 것만)
-    occ = (supabase.table("occurrences").select("*")
-           .gte("end_at", window_start.isoformat())
-           .lte("start_at", window_end.isoformat())
-           .order("start_at").execute().data) or []
-    for o in occ:
-        c = meta.get(o["content_id"])
-        if not c:
-            continue
-        items.append({
-            "id": o["id"],
-            "contentId": o["content_id"], "name": c["name"], "icon": c["icon"],
-            "type": c["type"], "roundLabel": o.get("round_label"),
-            "startAt": o["start_at"], "endAt": o["end_at"],
-        })
-
-    items.sort(key=lambda x: x["startAt"])
-    return items
+    비로그인 허용. id: 시즌=int, 상시=합성문자열(content@start).
+    실제 계산은 schedule_logic.build_schedule (일정 푸시 스케줄러와 공용)."""
+    return build_schedule(weeks)
 
 
 # ── 운영진: 시즌 회차 관리 ────────────────────────────────────
@@ -2823,8 +2764,52 @@ def admin_update_occurrence(occ_id: int, req: OccurrencePatch, admin: dict = Dep
     return result.data[0]
 
 
+@app.get("/api/admin/occurrences")
+def admin_list_occurrences(content_id: Optional[str] = None, admin: dict = Depends(require_admin)):
+    """운영진 일정 관리 화면용 — 등록된 시즌 회차 전체(과거 포함, 최신순). content_id로 필터 가능.
+    /api/schedule(window 한정)과 달리 과거 회차도 보여 삭제 가능하게 함."""
+    q = supabase.table("occurrences").select("*").order("start_at", desc=True)
+    if content_id:
+        q = q.eq("content_id", content_id)
+    rows = q.execute().data or []
+    return [{
+        "id": r["id"], "contentId": r["content_id"], "roundLabel": r.get("round_label"),
+        "startAt": r["start_at"], "endAt": r["end_at"],
+    } for r in rows]
+
+
 @app.delete("/api/admin/occurrences/{occ_id}")
 def admin_delete_occurrence(occ_id: int, admin: dict = Depends(require_admin)):
     """시즌 회차 삭제."""
     supabase.table("occurrences").delete().eq("id", occ_id).execute()
+    return {"status": "ok"}
+
+
+# ── 푸시 토큰 등록/해제 ────────────────────────────────────────
+# 앱이 로그인 직후 토큰 등록, 로그아웃/거부 시 해제. 일정 푸시는 push_send.py 스케줄러가 발송.
+
+class PushRegisterBody(BaseModel):
+    token: str
+    platform: Optional[str] = None
+
+
+class PushUnregisterBody(BaseModel):
+    token: str
+
+
+@app.post("/api/push/register")
+def push_register(body: PushRegisterBody, user: dict = Depends(get_current_user)):
+    """Expo push token 저장(토큰 UNIQUE upsert → 같은 토큰이면 캐릭터명/플랫폼만 갱신)."""
+    supabase.table("push_tokens").upsert({
+        "character_name": user["character_name"],
+        "token": body.token,
+        "platform": body.platform,
+    }, on_conflict="token").execute()
+    return {"status": "ok"}
+
+
+@app.post("/api/push/unregister")
+def push_unregister(body: PushUnregisterBody, user: dict = Depends(get_current_user)):
+    """로그아웃/알림 끄기 시 해당 토큰 삭제."""
+    supabase.table("push_tokens").delete().eq("token", body.token).execute()
     return {"status": "ok"}
