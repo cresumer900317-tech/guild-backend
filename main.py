@@ -1026,6 +1026,29 @@ def list_blocks(user: dict = Depends(get_current_user)):
     return [r["blocked"] for r in rows]
 
 
+# ── 실시간 채팅용 Supabase 토큰 브리지 ───────────────────────────
+# 자체 JWT로 로그인한 유저에게 Supabase Realtime/RLS 호환 JWT(HS256)를 발급.
+# Railway 환경변수 SUPABASE_JWT_SECRET (Supabase 프로젝트 JWT Secret) 필요.
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
+
+
+@app.get("/api/realtime-token")
+def realtime_token(user: dict = Depends(get_current_user)):
+    """채팅(Supabase Realtime)용 토큰. RLS에서 role=authenticated, sub=캐릭터명으로 인가."""
+    if not SUPABASE_JWT_SECRET:
+        raise HTTPException(status_code=503, detail="실시간 채팅이 아직 설정되지 않았습니다")
+    now = datetime.utcnow()
+    payload = {
+        "sub": user["character_name"],
+        "role": "authenticated",
+        "aud": "authenticated",
+        "iat": now,
+        "exp": now + timedelta(hours=12),
+    }
+    token = jwt.encode(payload, SUPABASE_JWT_SECRET, algorithm="HS256")
+    return {"token": token}
+
+
 # ── 공지사항 API ──────────────────────────────────────────────
 
 @app.get("/api/notices")
