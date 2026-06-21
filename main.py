@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse
 from database import supabase
 from scheduler import start_scheduler
 from schedule_logic import KST, build_schedule
+from push_send import _send  # Expo Push 발송 헬퍼(가입 문의 → 운영진 알림)
 from static_pages import PRIVACY_HTML, SUPPORT_HTML, TERMS_HTML
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -2966,3 +2967,92 @@ def push_unregister(body: PushUnregisterBody, user: dict = Depends(get_current_u
     """로그아웃/알림 끄기 시 해당 토큰 삭제."""
     supabase.table("push_tokens").delete().eq("token", body.token).execute()
     return {"status": "ok"}
+
+
+# ── 길드 가입 문의 (비로그인 제출 → 운영진 검토 + 푸시) ──────────────────
+# 외부인이 앱 로그인 화면에서 "길드 가입 문의"로 남긴 글을 저장하고,
+# 운영진(admin/superadmin)의 푸시 토큰에만 알림을 보낸다. 실제 합류는
+# 기존 흐름(members/temp 등록 → 회원가입 → 승인)으로 진행하고, 여기선
+# 문의 인박스 + 수락/거절 상태만 관리한다.
+
+class JoinInquiryIn(BaseModel):
+    character_name: str = Field(alias="characterName")
+    power_text: Optional[str] = Field(default=None, alias="powerText")
+    contact: Optional[str] = None
+    message: Optional[str] = None
+    model_config = {"populate_by_name": True}
+
+
+class JoinInquiryStatus(BaseModel):
+    status: str  # pending | accepted | rejected
+
+
+def _notify_admins_join_inquiry(name: str):
+    """가입 문의 접수 시 운영진 토큰으로 푸시(실패해도 접수는 성공시킨다)."""
+    try:
+        admins = (supabase.table("users").select("character_name")
+                  .in_("role", ["admin", "superadmin"]).execute().data) or []
+        admin_names = [a["character_name"] for a in admins]
+        if not admin_names:
+            return
+        rows = (supabase.table("push_tokens").select("token")
+                .in_("character_name", admin_names).execute().data) or []
+        tokens = [r["token"] for r in rows]
+        if tokens:
+            _send(tokens, "📨 새 길드 가입 문의",
+                  f"{name}님이 가입 문의를 남겼어요. 확인해보세요!",
+                  {"route": "/admin/join-inquiries"})
+    except Exception as e:
+        print(f"[가입문의] 운영진 푸시 실패: {e}")
+
+
+@app.post("/api/join-inquiries")
+def create_join_inquiry(req: JoinInquiryIn):
+    """길드 가입 문의 접수 (비로그인). 저장 후 운영진에 푸시."""
+    name = (req.character_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="캐릭터명(닉네임)을 입력해주세요")
+    if len(name) > 50:
+        raise HTTPException(status_code=400, detail="캐릭터명이 너무 깁니다")
+    # 같은 캐릭터명으로 미처리(pending) 문의가 이미 있으면 중복 접수 방지
+    dup = (supabase.table("join_inquiries").select("id")
+           .eq("character_name", name).eq("status", "pending").limit(1).execute().data)
+    if dup:
+        raise HTTPException(status_code=409, detail="이미 접수된 문의가 있어요. 운영진 확인을 기다려주세요")
+    supabase.table("join_inquiries").insert({
+        "character_name": name,
+        "power_text": ((req.power_text or "").strip() or None),
+        "contact": ((req.contact or "").strip() or None),
+        "message": ((req.message or "").strip() or None),
+        "status": "pending",
+    }).execute()
+    _notify_admins_join_inquiry(name)
+    return {"status": "ok", "message": "가입 문의가 접수됐어요. 운영진이 확인 후 연락드릴게요!"}
+
+
+@app.get("/api/admin/join-inquiries")
+def admin_list_join_inquiries(status: Optional[str] = None, admin: dict = Depends(require_admin)):
+    """가입 문의 목록(운영진). 기본 최신순 전체, status로 필터."""
+    q = supabase.table("join_inquiries").select("*").order("created_at", desc=True)
+    if status:
+        q = q.eq("status", status)
+    rows = q.execute().data or []
+    return [{
+        "id": r["id"], "characterName": r["character_name"],
+        "powerText": r.get("power_text"), "contact": r.get("contact"),
+        "message": r.get("message"), "status": r["status"],
+        "createdAt": r["created_at"],
+    } for r in rows]
+
+
+@app.patch("/api/admin/join-inquiries/{inq_id}")
+def admin_update_join_inquiry(inq_id: int, req: JoinInquiryStatus,
+                              admin: dict = Depends(require_admin)):
+    """문의 상태 변경(수락/거절/대기로 되돌리기)."""
+    if req.status not in ("pending", "accepted", "rejected"):
+        raise HTTPException(status_code=400, detail="잘못된 상태입니다")
+    result = (supabase.table("join_inquiries").update({"status": req.status})
+              .eq("id", inq_id).execute())
+    if not result.data:
+        raise HTTPException(status_code=404, detail="해당 문의를 찾을 수 없습니다")
+    return result.data[0]
