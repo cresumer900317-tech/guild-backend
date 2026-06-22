@@ -14,7 +14,7 @@ from database import supabase
 from scheduler import start_scheduler
 from schedule_logic import KST, build_schedule
 from push_send import _send  # Expo Push 발송 헬퍼(가입 문의 → 운영진 알림)
-from static_pages import PRIVACY_HTML, SUPPORT_HTML, TERMS_HTML
+from static_pages import PRIVACY_HTML, SUPPORT_HTML, TERMS_HTML, DELETE_ACCOUNT_HTML
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -248,6 +248,12 @@ def support_page():
 def terms_page():
     """이용약관 (UGC 무관용 조항 포함)."""
     return HTMLResponse(content=TERMS_HTML)
+
+
+@app.get("/delete-account", response_class=HTMLResponse)
+def delete_account_page():
+    """Google Play 데이터 보안용 계정·데이터 삭제 안내 페이지."""
+    return HTMLResponse(content=DELETE_ACCOUNT_HTML)
 
 
 @app.get("/healthz")

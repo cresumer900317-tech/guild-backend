@@ -84,6 +84,44 @@ SUPPORT_HTML = f"""<!DOCTYPE html><html lang="ko"><head>
 </ul>
 </body></html>"""
 
+DELETE_ACCOUNT_HTML = f"""<!DOCTYPE html><html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>길드라운지 계정 및 데이터 삭제</title>{_STYLE}</head><body>
+<h1>계정 및 데이터 삭제 요청</h1>
+<p class="sub">앱 이름: 길드라운지 · 개발자: gibaek pak</p>
+
+<p>길드라운지 회원은 아래 방법으로 계정과 관련된 모든 개인정보의 삭제를 요청할 수 있습니다.</p>
+
+<h2>방법 1. 앱에서 직접 탈퇴 (즉시 처리)</h2>
+<ul>
+<li>앱 실행 후 로그인</li>
+<li><b>[프로필] 탭 → [회원 탈퇴]</b> 선택</li>
+<li>확인하면 계정과 개인정보가 <b>지체 없이 영구 삭제</b>됩니다.</li>
+</ul>
+
+<h2>방법 2. 이메일로 요청 (앱에 접근할 수 없는 경우)</h2>
+<ul>
+<li>이메일: <a href="mailto:qkqhrnfl@icloud.com">qkqhrnfl@icloud.com</a></li>
+<li>본인 확인을 위해 가입한 <b>캐릭터명(닉네임)</b>을 함께 적어 보내주세요.</li>
+<li>접수 후 영업일 기준 7일 이내에 처리해 드립니다.</li>
+</ul>
+
+<h2>삭제되는 데이터</h2>
+<p>탈퇴 시 아래 데이터가 <b>모두 즉시 삭제되며, 별도로 보관되지 않습니다.</b></p>
+<ul>
+<li>캐릭터명(닉네임), 비밀번호, 이메일, 생년월일</li>
+<li>푸시 알림 토큰(기기 식별자)</li>
+<li>작성한 게시글·댓글·좋아요 등 활동 데이터</li>
+</ul>
+
+<h2>보관되는 데이터</h2>
+<p>관계 법령에 따라 보존이 의무화된 정보가 있는 경우에 한해 해당 법정 기간 동안만 보관 후 파기하며,
+그 외 보관되는 데이터는 없습니다.</p>
+
+<h2>문의</h2>
+<p><a href="mailto:qkqhrnfl@icloud.com">qkqhrnfl@icloud.com</a></p>
+</body></html>"""
+
 TERMS_HTML = f"""<!DOCTYPE html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>길드라운지 이용약관</title>{_STYLE}</head><body>
