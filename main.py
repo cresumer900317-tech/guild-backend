@@ -1420,6 +1420,29 @@ def delete_macro_comment(comment_id: int, user: dict = Depends(get_current_user)
     return {"status": "ok"}
 
 # ── 팁 게시판 댓글 ──────────────────────────────────
+def _notify_post_author(table: str, btype: str, post_id: int, commenter: str, comment_text: str):
+    """댓글 작성 시 글쓴이에게 푸시(본인 댓글이면 스킵, 실패해도 댓글 작성은 성공시킨다)."""
+    try:
+        post = supabase.table(table).select("author,title").eq("id", post_id).execute()
+        if not post.data:
+            return
+        author = post.data[0].get("author")
+        title = post.data[0].get("title") or "내 글"
+        if not author or author == commenter:
+            return  # 본인 글에 본인이 단 댓글엔 알림 안 보냄
+        rows = (supabase.table("push_tokens").select("token")
+                .eq("character_name", author).execute().data) or []
+        tokens = [r["token"] for r in rows]
+        if not tokens:
+            return
+        preview = comment_text[:40]
+        _send(tokens, "💬 새 댓글",
+              f'{commenter}님이 "{title}"에 댓글을 남겼어요: {preview}',
+              {"type": btype, "id": post_id})
+    except Exception as e:
+        print(f"[댓글알림] 푸시 실패: {e}")
+
+
 @app.get("/api/tips/{tip_id}/comments")
 def get_tip_comments(tip_id: int):
     result = supabase.table("tip_comments") \
@@ -1442,6 +1465,7 @@ def create_tip_comment(tip_id: int, req: TipCommentCreate, user: dict = Depends(
     if req.parent_id is not None:
         row["parent_id"] = req.parent_id
     result = supabase.table("tip_comments").insert(row).execute()
+    _notify_post_author("tips", "tip", tip_id, user["character_name"], content)
     return result.data[0] if result.data else {}
 
 @app.patch("/api/tips/comments/{comment_id}")
@@ -1492,6 +1516,7 @@ def create_free_comment(post_id: int, req: TipCommentCreate, user: dict = Depend
     if req.parent_id is not None:
         row["parent_id"] = req.parent_id
     result = supabase.table("free_comments").insert(row).execute()
+    _notify_post_author("free_posts", "free", post_id, user["character_name"], content)
     return result.data[0] if result.data else {}
 
 @app.patch("/api/free/comments/{comment_id}")
