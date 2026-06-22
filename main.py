@@ -1252,6 +1252,7 @@ def delete_free_post(post_id: int, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="없는 게시글")
     if row.data[0].get("author") != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
         raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
+    supabase.table("free_comments").delete().eq("post_id", post_id).execute()
     supabase.table("free_posts").delete().eq("id", post_id).execute()
     return {"status": "ok"}
 
@@ -1466,6 +1467,56 @@ def delete_tip_comment(comment_id: int, user: dict = Depends(get_current_user)):
     if comment.data[0]["author"] != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
         raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
     supabase.table("tip_comments").delete().eq("id", comment_id).execute()
+    return {"status": "ok"}
+
+# --- 자유게시판 댓글 (free_comments) — tip_comments와 동일 구조 ---
+@app.get("/api/free/{post_id}/comments")
+def get_free_comments(post_id: int):
+    result = supabase.table("free_comments") \
+        .select("*").eq("post_id", post_id).order("created_at", desc=False).execute()
+    return result.data or []
+
+@app.post("/api/free/{post_id}/comments")
+def create_free_comment(post_id: int, req: TipCommentCreate, user: dict = Depends(get_current_user)):
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="내용을 입력해주세요")
+    if len(content) > 500:
+        raise HTTPException(status_code=400, detail="500자 이내로 작성해주세요")
+    row = {
+        "post_id": post_id,
+        "content": content,
+        "author": user["character_name"],
+        "author_guild": req.author_guild,
+    }
+    if req.parent_id is not None:
+        row["parent_id"] = req.parent_id
+    result = supabase.table("free_comments").insert(row).execute()
+    return result.data[0] if result.data else {}
+
+@app.patch("/api/free/comments/{comment_id}")
+def update_free_comment(comment_id: int, req: TipCommentUpdate, user: dict = Depends(get_current_user)):
+    comment = supabase.table("free_comments").select("author").eq("id", comment_id).execute()
+    if not comment.data:
+        raise HTTPException(status_code=404, detail="없는 댓글")
+    if comment.data[0]["author"] != user["character_name"]:
+        raise HTTPException(status_code=403, detail="본인 댓글만 수정할 수 있습니다")
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="내용을 입력해주세요")
+    if len(content) > 500:
+        raise HTTPException(status_code=400, detail="500자 이내로 작성해주세요")
+    result = supabase.table("free_comments").update({"content": content}).eq("id", comment_id).execute()
+    return result.data[0] if result.data else {}
+
+@app.delete("/api/free/comments/{comment_id}")
+def delete_free_comment(comment_id: int, user: dict = Depends(get_current_user)):
+    comment = supabase.table("free_comments").select("author").eq("id", comment_id).execute()
+    if not comment.data:
+        raise HTTPException(status_code=404, detail="없는 댓글")
+    if comment.data[0]["author"] != user["character_name"] and user.get("role") not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="삭제 권한이 없습니다")
+    supabase.table("free_comments").delete().eq("id", comment_id).execute()
     return {"status": "ok"}
 
 
