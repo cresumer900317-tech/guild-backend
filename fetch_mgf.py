@@ -1,11 +1,17 @@
 import json
 import re
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
+
+
+def norm_name(s: str | None) -> str:
+    """한글 NFC 정규화 + 공백 제거. 길드 페이지 닉네임과 랭킹 페이지 닉네임 매칭용."""
+    return unicodedata.normalize("NFC", (s or "")).strip()
 
 from config import (
     TARGET_GUILD_URLS,
@@ -148,8 +154,8 @@ def parse_members_from_html(html: str, guild_name: str, guild_level: int = 0):
         detail_url = detail_el.get("href", "") if detail_el else ""
         if detail_url.startswith("/"):
             detail_url = "https://mgf.gg" + detail_url
-        detail = parse_detail_page(detail_url)
-        time.sleep(DETAIL_REQUEST_DELAY_SECONDS)
+        # 서버순위·인기도는 더 이상 캐릭터 상세 페이지(JS 렌더링)에서 못 긁는다.
+        # fetch_mgf_data()에서 랭킹 목록(index.php)을 일괄 조회해 아래 0 placeholder를 채운다.
         members.append({
             "capturedAt": datetime.now().isoformat(timespec="seconds"),
             "guild": guild_name,
@@ -163,9 +169,9 @@ def parse_members_from_html(html: str, guild_name: str, guild_level: int = 0):
             "detail_url": detail_url,
             "image": "",
             "is_master": bool(master_el),
-            "overall_rank": detail["overall_rank"],
-            "server_rank": detail["server_rank"],
-            "popularity": detail["popularity"],
+            "overall_rank": 0,
+            "server_rank": 0,
+            "popularity": 0,
         })
     members = sorted(members, key=lambda x: x.get("guildRank", 9999))
     return members[:MAX_MEMBERS_PER_GUILD]
@@ -183,6 +189,19 @@ def fetch_mgf_data():
         print(f" -> {len(members)}명")
         all_members.extend(members)
         time.sleep(REQUEST_DELAY_SECONDS)
+
+    # 서버순위 + 인기도 일괄 수집 (상세 페이지가 JS 렌더링으로 바뀌어 목록 페이지에서 추출)
+    names = {m["name"] for m in all_members}
+    rank_map = fetch_server_ranking(names)
+    matched = 0
+    for m in all_members:
+        info = rank_map.get(norm_name(m["name"]))
+        if info:
+            m["server_rank"] = info["server_rank"]
+            m["popularity"] = info["popularity"]
+            matched += 1
+    print(f"서버순위/인기도 매칭: {matched}/{len(all_members)}명")
+
     print(f"총 수집 인원: {len(all_members)}명")
     return all_members
 
@@ -386,6 +405,74 @@ def fetch_popularity_rank(member_names: set[str], max_pages: int = 100) -> dict[
         time.sleep(REQUEST_DELAY_SECONDS)
 
     print(f"[인기도 랭킹] 수집 완료: {len(found)}명 / 전체 {len(member_names)}명")
+    return found
+
+
+# ── 서버 전투력 랭킹(서버순위) + 인기도(♥) 값 크롤링 ──────────────
+# 캐릭터 상세 페이지가 클라이언트(JS) 렌더링으로 바뀌어 requests로는 수치를 못 읽는다.
+# 서버사이드 렌더링되는 랭킹 목록(index.php)에서 서버순위와 인기도를 한 번에 추출한다.
+SERVER_RANK_URL = "https://mgf.gg/ranking/index.php?server=11&recent=1&stx=&page={page}"
+
+def fetch_server_ranking(member_names: set[str], max_pages: int = 150) -> dict[str, dict]:
+    """
+    스카니아11 전투력 랭킹을 순회하며 친구패밀리 멤버의
+    '서버 순위'와 '인기도(♥)' 값을 함께 수집.
+    반환값: { 닉네임(NFC): {"server_rank": int, "popularity": int} }
+    멤버 전원 발견 또는 친구길드 없는 페이지가 연속되면 조기 종료.
+    """
+    found: dict[str, dict] = {}
+    remaining = {norm_name(n) for n in member_names}
+    empty_streak = 0
+
+    for page in range(1, max_pages + 1):
+        if not remaining:
+            break
+        url = SERVER_RANK_URL.format(page=page)
+        try:
+            html = fetch_page(url, retries=2)
+        except Exception as e:
+            print(f"[서버 랭킹] 페이지 {page} 오류: {e}")
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select("table.rank-table tr")
+
+        page_has_friend = False
+        for row in rows:
+            # index.php는 길드 뱃지가 <a class="badge-guild">, pop.php는 <span> — 태그 무관 클래스로 선택
+            guild_el = row.select_one(".badge-guild")
+            guild_name = norm_name(guild_el.get_text(strip=True)) if guild_el else ""
+            if guild_name not in FRIEND_GUILDS:
+                continue
+            page_has_friend = True
+
+            nick_el = row.select_one("span.nickname")
+            if not nick_el:
+                continue
+            name = norm_name(nick_el.get_text(strip=True))
+            if name not in remaining:
+                continue
+
+            rank_el = row.select_one("span.rank-total")
+            server_rank = parse_number(rank_el.get_text(strip=True)) if rank_el else 0
+            pop_el = row.select_one("span.badge-pop")  # "♥ 1,478"
+            popularity = parse_number(pop_el.get_text(strip=True)) if pop_el else 0
+
+            found[name] = {"server_rank": server_rank, "popularity": popularity}
+            remaining.discard(name)
+            print(f"[서버 랭킹] {name} → 서버 {server_rank}위 / ♥{popularity}")
+
+        if page_has_friend:
+            empty_streak = 0
+        else:
+            empty_streak += 1
+            if empty_streak >= 15 and page > 15:
+                print(f"[서버 랭킹] 빈 페이지 {empty_streak}연속 → 종료")
+                break
+
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    print(f"[서버 랭킹] 수집 완료: {len(found)}명 / 전체 {len(member_names)}명")
     return found
 
 
