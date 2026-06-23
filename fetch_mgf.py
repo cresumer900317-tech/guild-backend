@@ -476,6 +476,130 @@ def fetch_server_ranking(member_names: set[str], max_pages: int = 150) -> dict[s
     return found
 
 
+# ── 토벌전 / 월드보스 랭킹 (멤버별 점수 + 서버순위) ──────────────
+# index.php와 동일한 행 구조 + score-cell(점수). 상세 페이지 대신 목록에서 추출.
+BOSS_RANK_URLS = {
+    "guild_boss": "https://mgf.gg/ranking/guild_boss.php?server=11&page={page}",   # 토벌전
+    "world_boss": "https://mgf.gg/ranking/world_boss.php?server=11&page={page}",   # 월드보스
+}
+
+def fetch_boss_ranking(member_names: set[str], kind: str, max_pages: int = 150) -> dict[str, dict]:
+    """
+    kind: 'guild_boss'(토벌전) 또는 'world_boss'(월드보스).
+    반환값: { 닉네임(NFC): {"rank": 서버순위, "score": 점수(int)} }
+    """
+    url_tpl = BOSS_RANK_URLS[kind]
+    found: dict[str, dict] = {}
+    remaining = {norm_name(n) for n in member_names}
+    empty_streak = 0
+
+    for page in range(1, max_pages + 1):
+        if not remaining:
+            break
+        try:
+            html = fetch_page(url_tpl.format(page=page), retries=2)
+        except Exception as e:
+            print(f"[{kind}] 페이지 {page} 오류: {e}")
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select("table.rank-table tr")
+        page_has_friend = False
+        for row in rows:
+            guild_el = row.select_one(".badge-guild")
+            guild_name = norm_name(guild_el.get_text(strip=True)) if guild_el else ""
+            if guild_name not in FRIEND_GUILDS:
+                continue
+            page_has_friend = True
+
+            nick_el = row.select_one("span.nickname")
+            if not nick_el:
+                continue
+            name = norm_name(nick_el.get_text(strip=True))
+            if name not in remaining:
+                continue
+
+            rank_el = row.select_one("span.rank-total")
+            rank = parse_number(rank_el.get_text(strip=True)) if rank_el else 0
+            score_el = row.select_one(".score-tooltip") or row.select_one(".score-kor")
+            score = convert_korean_power_to_int(score_el.get_text(strip=True)) if score_el else 0
+
+            found[name] = {"rank": rank, "score": score}
+            remaining.discard(name)
+
+        if page_has_friend:
+            empty_streak = 0
+        else:
+            empty_streak += 1
+            if empty_streak >= 15 and page > 15:
+                print(f"[{kind}] 빈 페이지 {empty_streak}연속 → 종료")
+                break
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    print(f"[{kind}] 수집 완료: {len(found)}명 / 전체 {len(member_names)}명")
+    return found
+
+
+# ── 우리 친구 길드들의 서버 길드 랭킹 ───────────────────────────
+GUILD_RANK_URL = "https://mgf.gg/ranking/guild_ranking.php?server=11&page={page}"
+ACTUAL_FRIEND_GUILDS = {"친구들", "친구둘", "친구삼", "친구넷"}  # 실제 길드(친구닷=캐릭터 제외)
+
+def fetch_guild_server_ranks(max_pages: int = 100) -> dict[str, dict]:
+    """
+    친구 길드들의 스카니아11 길드 서버순위/레벨/인원/총전투력.
+    반환값: { 길드명(NFC): {"rank":int,"level":int,"members":int,"power":int} }
+    """
+    found: dict[str, dict] = {}
+    remaining = set(ACTUAL_FRIEND_GUILDS)
+    empty_streak = 0
+
+    for page in range(1, max_pages + 1):
+        if not remaining:
+            break
+        try:
+            html = fetch_page(GUILD_RANK_URL.format(page=page), retries=2)
+        except Exception as e:
+            print(f"[길드 랭킹] 페이지 {page} 오류: {e}")
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select("table.rank-table tr")
+        page_has_friend = False
+        for row in rows:
+            gname_el = row.select_one(".guild-name")
+            if not gname_el:
+                continue
+            gname = norm_name(gname_el.get_text(strip=True))
+            if gname not in remaining:
+                continue
+            page_has_friend = True
+
+            rank_el = row.select_one(".rank-cell")
+            rank = parse_number(rank_el.get_text(strip=True)) if rank_el else 0
+            level_el = row.select_one(".guild-level")
+            level = parse_number(level_el.get_text(strip=True)) if level_el else 0
+            power_el = row.select_one(".power-tooltip")
+            power = convert_korean_power_to_int(power_el.get_text(strip=True)) if power_el else 0
+            mm = re.search(r"(\d+)\s*명", row.get_text(" ", strip=True))
+            members = int(mm.group(1)) if mm else 0
+
+            found[gname] = {"rank": rank, "level": level, "members": members, "power": power}
+            remaining.discard(gname)
+            print(f"[길드 랭킹] {gname} → 서버 {rank}위 / Lv.{level} / {members}명 / {power}")
+
+        if page_has_friend:
+            empty_streak = 0
+        else:
+            empty_streak += 1
+            if empty_streak >= 10 and page > 5:
+                print(f"[길드 랭킹] 빈 페이지 {empty_streak}연속 → 종료")
+                break
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    print(f"[길드 랭킹] 수집 완료: {len(found)}/{len(ACTUAL_FRIEND_GUILDS)}개 길드")
+    return found
+
+
 def fetch_rival_guilds() -> tuple[list[dict], list[dict]]:
     """경쟁 길드 데이터 수집 → (길드 요약 리스트, 멤버 리스트)"""
     summaries = []

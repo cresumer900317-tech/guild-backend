@@ -110,16 +110,18 @@ def run_crawl():
         # snake_case 변환
         members = to_snake(members_camel)
 
-        # 기존 pop_server_rank 보존
-        existing = supabase.table("members").select("name,pop_server_rank").execute()
-        pop_map = {m["name"]: m.get("pop_server_rank") for m in (existing.data or []) if m.get("pop_server_rank") is not None}
+        # 별도 잡(인기도/보스 순위)이 채우는 컬럼 보존 — delete/insert 사이 유실 방지
+        KEEP_COLS = ("pop_server_rank", "boss_score", "boss_rank", "wboss_score", "wboss_rank")
+        existing = supabase.table("members").select("name," + ",".join(KEEP_COLS)).execute()
+        keep_map = {m["name"]: {c: m.get(c) for c in KEEP_COLS} for m in (existing.data or [])}
 
         # 기존 데이터 삭제 후 새로 저장
         supabase.table("members").delete().neq("id", 0).execute()
         if members:
             for m in members:
-                if m.get("name") in pop_map:
-                    m["pop_server_rank"] = pop_map[m["name"]]
+                saved = keep_map.get(m.get("name")) or {}
+                for c in KEEP_COLS:  # 모든 행에 동일 키 보장(이전 값 복원 or None)
+                    m[c] = saved.get(c)
             supabase.table("members").insert(members).execute()
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
@@ -211,6 +213,63 @@ def run_pop_rank_update():
         logger.error(f"[인기도 순위] 오류: {e}")
 
 
+def run_boss_rank_update():
+    """토벌전/월드보스 점수·서버순위 크롤링 → members 테이블 업데이트 (1시간마다)"""
+    logger.info("=== [보스 랭킹] 업데이트 시작 ===")
+    try:
+        from fetch_mgf import fetch_boss_ranking, norm_name
+        result = supabase.table("members").select("id, name").execute()
+        members = result.data or []
+        if not members:
+            logger.info("[보스 랭킹] 멤버 없음")
+            return
+
+        name_to_id = {m["name"]: m["id"] for m in members}
+        names = set(name_to_id.keys())
+        gb = fetch_boss_ranking(names, "guild_boss")   # 토벌전
+        wb = fetch_boss_ranking(names, "world_boss")   # 월드보스
+
+        updated = 0
+        for raw_name, mid in name_to_id.items():
+            n = norm_name(raw_name)
+            patch = {
+                "boss_score":  (gb.get(n) or {}).get("score"),
+                "boss_rank":   (gb.get(n) or {}).get("rank"),
+                "wboss_score": (wb.get(n) or {}).get("score"),
+                "wboss_rank":  (wb.get(n) or {}).get("rank"),
+            }
+            supabase.table("members").update(patch).eq("id", mid).execute()
+            if any(v is not None for v in patch.values()):
+                updated += 1
+
+        logger.info(f"=== [보스 랭킹] 완료: {updated}명 갱신 ===")
+    except Exception as e:
+        logger.error(f"[보스 랭킹] 오류: {e}")
+
+
+def run_guild_rank_update():
+    """친구 길드들의 서버 길드순위 크롤링 → guild_server_ranks upsert (1시간마다)"""
+    logger.info("=== [길드 랭킹] 업데이트 시작 ===")
+    try:
+        from fetch_mgf import fetch_guild_server_ranks
+        ranks = fetch_guild_server_ranks()
+        if not ranks:
+            logger.info("[길드 랭킹] 수집 결과 없음")
+            return
+        rows = [{
+            "guild_name": gname,
+            "server_rank": info["rank"],
+            "guild_level": info["level"],
+            "member_count": info["members"],
+            "total_power": info["power"],
+            "captured_at": datetime.now().isoformat(),
+        } for gname, info in ranks.items()]
+        supabase.table("guild_server_ranks").upsert(rows, on_conflict="guild_name").execute()
+        logger.info(f"=== [길드 랭킹] 완료: {len(rows)}개 길드 ===")
+    except Exception as e:
+        logger.error(f"[길드 랭킹] 오류: {e}")
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler()
 
@@ -222,6 +281,10 @@ def start_scheduler():
 
     # 1시간마다 인기도 서버 순위 업데이트
     scheduler.add_job(run_pop_rank_update, IntervalTrigger(hours=1))
+
+    # 1시간마다 토벌전/월드보스 순위 + 길드 서버순위 업데이트
+    scheduler.add_job(run_boss_rank_update, IntervalTrigger(hours=1))
+    scheduler.add_job(run_guild_rank_update, IntervalTrigger(hours=1))
 
     # 매달 1일 00:05에 크롤링 + 월간 스냅샷 저장
     scheduler.add_job(

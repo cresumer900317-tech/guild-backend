@@ -194,6 +194,10 @@ def to_camel(members):
             "growthRate": m.get("growth_rate"),
             "popularity": m.get("popularity"),
             "popServerRank": m.get("pop_server_rank"),
+            "bossScore": m.get("boss_score"),
+            "bossRank": m.get("boss_rank"),
+            "wbossScore": m.get("wboss_score"),
+            "wbossRank": m.get("wboss_rank"),
             "detailUrl": m.get("detail_url"),
             "isMaster": m.get("is_master", False),
             "rank": m.get("rank"),
@@ -508,6 +512,36 @@ def manual_snapshot():
     from scheduler import run_crawl_and_snapshot
     run_crawl_and_snapshot()
     return {"status": "ok", "message": "월간 스냅샷 저장 완료"}
+
+
+@app.post("/api/update-boss-rank")
+def update_boss_rank():
+    """토벌전/월드보스 점수·서버순위 크롤링 → members 갱신 (수동 트리거)"""
+    from scheduler import run_boss_rank_update
+    run_boss_rank_update()
+    return {"status": "ok", "message": "보스 랭킹 갱신 완료"}
+
+
+@app.post("/api/update-guild-ranks")
+def update_guild_ranks():
+    """친구 길드들의 서버 길드순위 크롤링 → guild_server_ranks 갱신 (수동 트리거)"""
+    from scheduler import run_guild_rank_update
+    run_guild_rank_update()
+    return {"status": "ok", "message": "길드 순위 갱신 완료"}
+
+
+@app.get("/api/guild-ranks")
+def get_guild_ranks():
+    """친구 길드들의 스카니아11 서버 길드순위 (서버순위 오름차순)"""
+    data = supabase.table("guild_server_ranks").select("*").order("server_rank").execute()
+    return [{
+        "guildName": r.get("guild_name"),
+        "serverRank": r.get("server_rank"),
+        "guildLevel": r.get("guild_level"),
+        "memberCount": r.get("member_count"),
+        "totalPower": r.get("total_power"),
+        "capturedAt": r.get("captured_at"),
+    } for r in (data.data or [])]
 
 
 @app.get("/api/rivals")
