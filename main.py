@@ -1975,6 +1975,112 @@ def delete_personal_project(project_id: int, user: dict = Depends(get_current_us
     return {"status": "ok"}
 
 
+# ── 코드 전달함 (Snippets) — 맥↔회사 노트북 코드 브릿지 ──────────
+
+ALLOWED_SNIPPET_KIND = {"single", "tb4"}
+SNIPPET_MAX = 200000  # 코드 한 칸 최대 길이 (≈200KB)
+
+
+class PersonalSnippetCreate(BaseModel):
+    title: Optional[str] = ""
+    kind: Optional[str] = "single"
+    content: Optional[str] = ""      # kind=single 일 때 본문
+    html: Optional[str] = ""         # kind=tb4 (ThingsBoard 4파트)
+    css: Optional[str] = ""
+    js: Optional[str] = ""
+    settings: Optional[str] = ""
+    sort_order: Optional[int] = 0
+
+
+class PersonalSnippetUpdate(BaseModel):
+    title: Optional[str] = None
+    kind: Optional[str] = None
+    content: Optional[str] = None
+    html: Optional[str] = None
+    css: Optional[str] = None
+    js: Optional[str] = None
+    settings: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+def _validate_snippet_len(*parts: Optional[str]):
+    for p in parts:
+        if p and len(p) > SNIPPET_MAX:
+            raise HTTPException(status_code=400, detail="코드가 너무 깁니다 (한 칸 200KB 이내)")
+
+
+@app.get("/api/me/snippets")
+def list_personal_snippets(user: dict = Depends(get_current_user)):
+    result = supabase.table("personal_snippets") \
+        .select("*").eq("owner", user["character_name"]) \
+        .order("sort_order").order("updated_at", desc=True).execute()
+    return result.data or []
+
+
+@app.post("/api/me/snippets")
+def create_personal_snippet(req: PersonalSnippetCreate, user: dict = Depends(get_current_user)):
+    kind = req.kind or "single"
+    if kind not in ALLOWED_SNIPPET_KIND:
+        raise HTTPException(status_code=400, detail="잘못된 종류입니다")
+    title = (req.title or "").strip()
+    if len(title) > 200:
+        raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
+    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    row = {
+        "owner": user["character_name"],
+        "title": title,
+        "kind": kind,
+        "content": req.content or "",
+        "html": req.html or "",
+        "css": req.css or "",
+        "js": req.js or "",
+        "settings": req.settings or "",
+        "sort_order": req.sort_order or 0,
+    }
+    result = supabase.table("personal_snippets").insert(row).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.patch("/api/me/snippets/{snippet_id}")
+def update_personal_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_snippets") \
+        .select("*").eq("id", snippet_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
+    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    updates: dict = {}
+    if req.title is not None:
+        t = req.title.strip()
+        if len(t) > 200:
+            raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
+        updates["title"] = t
+    if req.kind is not None:
+        if req.kind not in ALLOWED_SNIPPET_KIND:
+            raise HTTPException(status_code=400, detail="잘못된 종류입니다")
+        updates["kind"] = req.kind
+    for field in ("content", "html", "css", "js", "settings"):
+        val = getattr(req, field)
+        if val is not None:
+            updates[field] = val
+    if req.sort_order is not None:
+        updates["sort_order"] = req.sort_order
+    if not updates:
+        return existing.data[0]
+    updates["updated_at"] = datetime.now().isoformat()
+    result = supabase.table("personal_snippets").update(updates).eq("id", snippet_id).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.delete("/api/me/snippets/{snippet_id}")
+def delete_personal_snippet(snippet_id: int, user: dict = Depends(get_current_user)):
+    existing = supabase.table("personal_snippets") \
+        .select("id").eq("id", snippet_id).eq("owner", user["character_name"]).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
+    supabase.table("personal_snippets").delete().eq("id", snippet_id).execute()
+    return {"status": "ok"}
+
+
 # ── Inbox (즉흥 메모) ─────────────────────────────────────────
 
 class PersonalInboxCreate(BaseModel):
