@@ -273,18 +273,24 @@ def run_guild_rank_update():
 def start_scheduler():
     scheduler = BackgroundScheduler()
 
-    # 1시간마다 일반 크롤링
-    scheduler.add_job(run_crawl, IntervalTrigger(hours=1))
+    # IntervalTrigger는 첫 실행이 "시작 +1시간"이라, 재배포가 잦으면 그 1시간 안에
+    # 컨테이너가 리셋되어 크롤이 한 번도 안 도는 경우가 생긴다(토벌전·월드보스가 계속 null이던 원인).
+    # → 앱 데이터 핵심 크롤 4종은 next_run_time=now로 시작 직후 1회 즉시 실행해 항상 채워지게 한다.
+    #   (BackgroundScheduler 워커 스레드에서 돌아 웹서버 부팅을 막지 않음)
+    now = datetime.now()
+
+    # 1시간마다 일반 크롤링 (전투력/멤버) — 시작 시 즉시 1회
+    scheduler.add_job(run_crawl, IntervalTrigger(hours=1), next_run_time=now)
 
     # 1시간마다 경쟁 길드 크롤링
     scheduler.add_job(run_rival_crawl, IntervalTrigger(hours=1))
 
-    # 1시간마다 인기도 서버 순위 업데이트
-    scheduler.add_job(run_pop_rank_update, IntervalTrigger(hours=1))
+    # 1시간마다 인기도 서버 순위 업데이트 — 시작 시 즉시 1회
+    scheduler.add_job(run_pop_rank_update, IntervalTrigger(hours=1), next_run_time=now)
 
-    # 1시간마다 토벌전/월드보스 순위 + 길드 서버순위 업데이트
-    scheduler.add_job(run_boss_rank_update, IntervalTrigger(hours=1))
-    scheduler.add_job(run_guild_rank_update, IntervalTrigger(hours=1))
+    # 1시간마다 토벌전/월드보스 순위 + 길드 서버순위 업데이트 — 시작 시 즉시 1회
+    scheduler.add_job(run_boss_rank_update, IntervalTrigger(hours=1), next_run_time=now)
+    scheduler.add_job(run_guild_rank_update, IntervalTrigger(hours=1), next_run_time=now)
 
     # 매달 1일 00:05에 크롤링 + 월간 스냅샷 저장
     scheduler.add_job(
