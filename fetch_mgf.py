@@ -483,22 +483,27 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
     스카니아11 전투력 랭킹(index.php)을 순회하며 상위 limit명을 길드 무관 전부 수집.
     반환: [{"server_rank","nickname","guild","power","power_text","popularity","level","job"}...]
     """
+    # Railway 데이터센터 IP는 mgf.gg에서 ~수십 페이지 후 rate-limit(429/차단) 걸리는 패턴.
+    # 실패/빈페이지 시 백오프로 점점 길게 쉬며 "같은 페이지를 재시도"(순위 누락 방지).
+    # 연속 실패가 한계를 넘으면 중단.
+    DELAY = 1.0          # 페이지 간 기본 간격(기존 0.8 → 1.0으로 완화)
+    MAX_CONSEC = 8       # 연속 실패 허용치
     results: list[dict] = []
-    consec_fail = 0   # 연속 실패(에러/빈페이지) — 일시적 오류 1회로 전체 중단하지 않도록
-    for page in range(1, max_pages + 1):
-        if len(results) >= limit:
-            break
+    consec_fail = 0
+    page = 1
+    while page <= max_pages and len(results) < limit:
         url = SERVER_RANK_URL.format(page=page)
         try:
-            html = fetch_page(url, retries=3)
+            html = fetch_page(url, retries=2)
         except Exception as e:
-            print(f"[서버 전체] 페이지 {page} 오류: {e} (연속실패 {consec_fail+1})")
             consec_fail += 1
-            if consec_fail >= 5:
-                print("[서버 전체] 연속 실패 5회 → 중단")
+            backoff = min(3 * consec_fail, 20)   # 3,6,9…최대 20초
+            print(f"[서버 전체] 페이지 {page} 오류: {e} (연속 {consec_fail}/{MAX_CONSEC}) → {backoff}s 후 재시도")
+            if consec_fail >= MAX_CONSEC:
+                print("[서버 전체] 연속 실패 한계 → 중단")
                 break
-            time.sleep(REQUEST_DELAY_SECONDS)
-            continue
+            time.sleep(backoff)
+            continue   # 같은 page 재시도
 
         soup = BeautifulSoup(html, "html.parser")
         rows = soup.select("table.rank-table tr")
@@ -539,15 +544,18 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
             if len(results) >= limit:
                 break
 
-        if page_count == 0:   # 빈 페이지 — 끝이거나 일시 오류. 연속 5회만 중단
+        if page_count == 0:   # 빈 페이지 — 끝이거나 rate-limit 챌린지 페이지. 백오프 후 같은 page 재시도
             consec_fail += 1
-            print(f"[서버 전체] 페이지 {page} 빈 결과 (연속 {consec_fail})")
-            if consec_fail >= 5:
-                print("[서버 전체] 빈 페이지 연속 5회 → 종료")
+            backoff = min(3 * consec_fail, 20)
+            print(f"[서버 전체] 페이지 {page} 빈 결과 (연속 {consec_fail}/{MAX_CONSEC}) → {backoff}s 후 재시도")
+            if consec_fail >= MAX_CONSEC:
+                print("[서버 전체] 빈 페이지 한계 → 종료")
                 break
-        else:
-            consec_fail = 0
-        time.sleep(REQUEST_DELAY_SECONDS)
+            time.sleep(backoff)
+            continue   # 같은 page 재시도
+        consec_fail = 0
+        page += 1      # 성공 시에만 다음 페이지로
+        time.sleep(DELAY)
 
     results.sort(key=lambda x: x["server_rank"])
     print(f"[서버 전체] 수집 완료: {len(results)}명")
