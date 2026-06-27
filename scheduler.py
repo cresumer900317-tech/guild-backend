@@ -275,10 +275,19 @@ def run_server_top_update():
     logger.info("=== [서버 전체] 업데이트 시작 ===")
     try:
         from fetch_mgf import fetch_server_top
-        rows = fetch_server_top(limit=3000)
+        rows = fetch_server_top(limit=7000, max_pages=240)
         # 크롤 실패(부분 수집) 시 기존 데이터 보존 — 빈/반쪽 교체 방지
         if len(rows) < 100:
             logger.info(f"[서버 전체] 수집 {len(rows)}명뿐 → 교체 건너뜀(기존 유지)")
+            return
+        # 데이터센터 IP(Railway)는 mgf rate-limit으로 ~960에서 끊김. 이미 더 큰 데이터가
+        # 있으면(거주지 IP 풀크롤로 채운 경우) 부분수집으로 깎지 않는다.
+        try:
+            existing_count = supabase.table("server_ranking").select("server_rank", count="exact").limit(1).execute().count or 0
+        except Exception:
+            existing_count = 0
+        if existing_count >= 1000 and len(rows) < existing_count * 0.8:
+            logger.info(f"[서버 전체] 수집 {len(rows)}명 < 기존 {existing_count}×0.8 → 차단 의심, 교체 건너뜀(기존 유지)")
             return
         now = datetime.now().isoformat()
         for r in rows:
