@@ -732,6 +732,48 @@ def points_ranking(limit: int = 100):
         return []
 
 
+# ══════════ 멤버 1:1 라이벌(일방 지정) ══════════
+# 친구패밀리 멤버끼리 라이벌로 등록 → 프론트가 members 데이터로 1:1 비교.
+# ⚠️ 기존 /api/rivals(경쟁 길드)와 별개. 테이블 rival_picks(owner, rival_name).
+RIVAL_PICK_CAP = 5
+
+
+@app.get("/api/rival-picks")
+def get_rival_picks(user: dict = Depends(get_current_user)):
+    """내가 등록한 라이벌 이름 목록."""
+    try:
+        r = supabase.table("rival_picks").select("rival_name,created_at")\
+            .eq("owner", user["character_name"]).order("created_at").execute()
+        return [x.get("rival_name") for x in (r.data or [])]
+    except Exception as e:
+        print(f"[rival-picks] {e}")
+        return []
+
+
+@app.post("/api/rival-picks")
+def add_rival_pick(payload: dict, user: dict = Depends(get_current_user)):
+    owner = user["character_name"]
+    rival = (payload.get("rival_name") or "").strip()
+    if not rival:
+        raise HTTPException(status_code=400, detail="라이벌을 선택해주세요")
+    if rival == owner:
+        raise HTTPException(status_code=400, detail="자기 자신은 라이벌로 등록할 수 없어요")
+    existing = supabase.table("rival_picks").select("id").eq("owner", owner).execute()
+    if len(existing.data or []) >= RIVAL_PICK_CAP:
+        raise HTTPException(status_code=400, detail=f"라이벌은 최대 {RIVAL_PICK_CAP}명까지 등록할 수 있어요")
+    supabase.table("rival_picks").upsert(
+        {"owner": owner, "rival_name": rival}, on_conflict="owner,rival_name"
+    ).execute()
+    return {"status": "ok"}
+
+
+@app.delete("/api/rival-picks/{rival_name}")
+def del_rival_pick(rival_name: str, user: dict = Depends(get_current_user)):
+    supabase.table("rival_picks").delete()\
+        .eq("owner", user["character_name"]).eq("rival_name", rival_name).execute()
+    return {"status": "ok"}
+
+
 @app.get("/api/rivals")
 def get_rivals():
     """
