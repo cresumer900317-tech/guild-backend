@@ -496,26 +496,37 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
     # Railway 데이터센터 IP는 mgf.gg에서 ~수십 페이지 후 rate-limit(429/차단) 걸리는 패턴.
     # 실패/빈페이지 시 백오프로 점점 길게 쉬며 "같은 페이지를 재시도"(순위 누락 방지).
     # 연속 실패가 한계를 넘으면 중단.
-    DELAY = 1.0          # 페이지 간 기본 간격(기존 0.8 → 1.0으로 완화)
-    MAX_CONSEC = 8       # 연속 실패 허용치
+    DELAY = 1.0          # 페이지 간 기본 간격
+    MAX_CONSEC = 18      # 캡차 IP 회피용: 실패할 때마다 출구 IP를 바꿔가며 재시도
     results: list[dict] = []
     consec_fail = 0
     page = 1
-    # (임시 디버그) 출구 IP 확인
-    try:
-        _eip = _session.get("https://ipv4.icanhazip.com", proxies=SERVER_PROXY, timeout=15).text.strip()
-        print(f"[서버 전체][DBG] 프록시={'ON' if SERVER_PROXY else 'OFF'} 출구IP={_eip}")
-    except Exception as _e:
-        print(f"[서버 전체][DBG] 출구IP 확인실패: {repr(_e)[:120]}")
-    _dbg_done = False
+
+    # 서버 풀크롤 전용 세션(멤버 크롤의 _session과 분리). mgf가 IPRoyal 풀의 일부 출구 IP에
+    # 캡차를 띄우므로, 캡차/실패를 만나면 연결을 닫아 새 출구 IP(IPRoyal randomize)로 회전한다.
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    if SERVER_PROXY:
+        s.proxies.update(SERVER_PROXY)
+
+    def _rotate_ip():
+        if SERVER_PROXY:
+            try:
+                s.close()   # 연결 풀 종료 → 다음 요청은 새 연결 = 새 출구 IP
+            except Exception:
+                pass
+
     while page <= max_pages and len(results) < limit:
         url = SERVER_RANK_URL.format(page=page)
         try:
-            html = fetch_page(url, retries=2, proxies=SERVER_PROXY)
+            res = s.get(url, timeout=REQUEST_TIMEOUT)
+            res.encoding = "utf-8"
+            html = res.text
         except Exception as e:
             consec_fail += 1
-            backoff = min(3 * consec_fail, 20)   # 3,6,9…최대 20초
-            print(f"[서버 전체] 페이지 {page} 오류: {e} (연속 {consec_fail}/{MAX_CONSEC}) → {backoff}s 후 재시도")
+            _rotate_ip()
+            backoff = min(2 * consec_fail, 12)
+            print(f"[서버 전체] p{page} 오류:{repr(e)[:50]} (연속 {consec_fail}/{MAX_CONSEC}) → IP회전·{backoff}s")
             if consec_fail >= MAX_CONSEC:
                 print("[서버 전체] 연속 실패 한계 → 중단")
                 break
@@ -561,21 +572,22 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
             if len(results) >= limit:
                 break
 
-        if page_count == 0:   # 빈 페이지 — 끝이거나 rate-limit 챌린지 페이지. 백오프 후 같은 page 재시도
-            if not _dbg_done:
-                _dbg_done = True
-                _low = html.lower()
-                print(f"[서버 전체][DBG] p{page} 빈결과: len={len(html)} table={'rank-table' in html} "
-                      f"cf={'cloudflare' in _low or 'cf-' in _low} cap={'captcha' in _low} "
-                      f"snip={html[:160].strip()!r}")
+        if page_count == 0:
+            # 랭킹 테이블 구조는 있는데 데이터 행이 0 = 진짜 끝
+            if "rank-table" in html:
+                print(f"[서버 전체] p{page} 데이터 끝 → 종료 (수집 {len(results)})")
+                break
+            # 테이블 자체가 없음 = 캡차/차단 페이지 → 새 출구 IP로 같은 page 재시도
             consec_fail += 1
-            backoff = min(3 * consec_fail, 20)
-            print(f"[서버 전체] 페이지 {page} 빈 결과 (연속 {consec_fail}/{MAX_CONSEC}) → {backoff}s 후 재시도")
+            is_cap = "captcha" in html.lower()
+            _rotate_ip()
+            backoff = min(2 * consec_fail, 12)
+            print(f"[서버 전체] p{page} {'캡차' if is_cap else '빈페이지'} (연속 {consec_fail}/{MAX_CONSEC}) → IP회전·{backoff}s")
             if consec_fail >= MAX_CONSEC:
-                print("[서버 전체] 빈 페이지 한계 → 종료")
+                print("[서버 전체] 캡차 한계 → 중단")
                 break
             time.sleep(backoff)
-            continue   # 같은 page 재시도
+            continue   # 같은 page 재시도(새 IP)
         consec_fail = 0
         page += 1      # 성공 시에만 다음 페이지로
         time.sleep(DELAY)
