@@ -271,7 +271,7 @@ def run_guild_rank_update():
 
 
 def run_server_top_update():
-    """스카니아11 서버 전체 랭킹 Top-N 크롤 → server_ranking 테이블 전량 교체 (6시간마다)"""
+    """스카니아11 서버 전체 랭킹 Top-N 크롤 → server_ranking 테이블 전량 교체 (하루 2회)"""
     logger.info("=== [서버 전체] 업데이트 시작 ===")
     try:
         from fetch_mgf import fetch_server_top
@@ -324,10 +324,11 @@ def start_scheduler():
     scheduler.add_job(run_boss_rank_update, IntervalTrigger(hours=1), next_run_time=now)
     scheduler.add_job(run_guild_rank_update, IntervalTrigger(hours=1), next_run_time=now)
 
-    # 서버 전체 랭킹(3000명)은 무거우니 6시간마다 + 시작 직후 1회
+    # 서버 전체 랭킹(~6800명)은 무겁고 mgf 부담을 줄이려 하루 2회(12h) + 시작 직후 1회.
+    # PROXY_URL 미설정 시 Railway IP는 ~960에서 막혀 가드가 교체를 스킵(기존 데이터 보존).
     scheduler.add_job(
         run_server_top_update,
-        IntervalTrigger(hours=6),
+        IntervalTrigger(hours=12),
         next_run_time=datetime.now(),
     )
 

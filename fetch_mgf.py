@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 import unicodedata
@@ -34,6 +35,14 @@ HEADERS = {
 
 _session = requests.Session()
 _session.headers.update(HEADERS)
+
+# 거주지 프록시(선택): 환경변수 PROXY_URL 이 있으면 모든 mgf 요청을 그 프록시로 우회한다.
+# 용도: 데이터센터 IP(Railway)가 mgf rate-limit에 막히는 문제 회피 → 서버 전체 풀크롤 가능.
+# 미설정 시 직접 연결(기존 동작 그대로, 영향 없음). 형식: http://user:pass@host:port
+_proxy_url = os.environ.get("PROXY_URL", "").strip()
+if _proxy_url:
+    _session.proxies.update({"http": _proxy_url, "https": _proxy_url})
+    print(f"[fetch_mgf] PROXY_URL 적용됨 (호스트: {_proxy_url.split('@')[-1] if '@' in _proxy_url else _proxy_url})")
 
 def safe_filename(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", name)
