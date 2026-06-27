@@ -484,15 +484,21 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
     반환: [{"server_rank","nickname","guild","power","power_text","popularity","level","job"}...]
     """
     results: list[dict] = []
+    consec_fail = 0   # 연속 실패(에러/빈페이지) — 일시적 오류 1회로 전체 중단하지 않도록
     for page in range(1, max_pages + 1):
         if len(results) >= limit:
             break
         url = SERVER_RANK_URL.format(page=page)
         try:
-            html = fetch_page(url, retries=2)
+            html = fetch_page(url, retries=3)
         except Exception as e:
-            print(f"[서버 전체] 페이지 {page} 오류: {e}")
-            break
+            print(f"[서버 전체] 페이지 {page} 오류: {e} (연속실패 {consec_fail+1})")
+            consec_fail += 1
+            if consec_fail >= 5:
+                print("[서버 전체] 연속 실패 5회 → 중단")
+                break
+            time.sleep(REQUEST_DELAY_SECONDS)
+            continue
 
         soup = BeautifulSoup(html, "html.parser")
         rows = soup.select("table.rank-table tr")
@@ -533,8 +539,14 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
             if len(results) >= limit:
                 break
 
-        if page_count == 0:   # 빈 페이지(끝) → 종료
-            break
+        if page_count == 0:   # 빈 페이지 — 끝이거나 일시 오류. 연속 5회만 중단
+            consec_fail += 1
+            print(f"[서버 전체] 페이지 {page} 빈 결과 (연속 {consec_fail})")
+            if consec_fail >= 5:
+                print("[서버 전체] 빈 페이지 연속 5회 → 종료")
+                break
+        else:
+            consec_fail = 0
         time.sleep(REQUEST_DELAY_SECONDS)
 
     results.sort(key=lambda x: x["server_rank"])
