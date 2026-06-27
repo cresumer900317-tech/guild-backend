@@ -298,6 +298,25 @@ def run_server_top_update():
         for i in range(0, len(rows), CHUNK):
             supabase.table("server_ranking").insert(rows[i:i + CHUNK]).execute()
         logger.info(f"=== [서버 전체] 완료: {len(rows)}명 저장 ===")
+
+        # 일별 이력 적립(프로필 성장 그래프용). 테이블(server_ranking_history) 없으면 조용히 스킵.
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            hist = [{
+                "snapshot_date": today,
+                "name": r.get("nickname"),
+                "server_rank": r.get("server_rank"),
+                "guild": r.get("guild"),
+                "power": r.get("power"),
+                "popularity": r.get("popularity"),
+            } for r in rows]
+            for i in range(0, len(hist), CHUNK):
+                supabase.table("server_ranking_history").upsert(
+                    hist[i:i + CHUNK], on_conflict="snapshot_date,name"
+                ).execute()
+            logger.info(f"[서버 이력] {today} {len(hist)}명 적립")
+        except Exception as he:
+            logger.warning(f"[서버 이력] 적립 스킵(테이블 미생성?): {repr(he)[:120]}")
     except Exception as e:
         logger.error(f"[서버 전체] 오류: {e}")
 
