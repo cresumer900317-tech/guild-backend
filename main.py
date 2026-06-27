@@ -553,7 +553,7 @@ def get_guild_ranks():
 
 
 @app.get("/api/server-ranking")
-def get_server_ranking(limit: int = 3000):
+def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
     try:
         # PostgREST 기본 max-rows(1000) 캡 우회 — 1000행씩 끊어 누적
