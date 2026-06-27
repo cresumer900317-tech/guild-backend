@@ -522,6 +522,14 @@ def update_boss_rank():
     return {"status": "ok", "message": "보스 랭킹 갱신 완료"}
 
 
+@app.post("/api/update-server-ranking")
+def update_server_ranking():
+    """스카니아11 서버 전체 Top3000 크롤 → server_ranking 갱신 (수동 트리거). 테이블 생성 후 호출."""
+    from scheduler import run_server_top_update
+    run_server_top_update()
+    return {"status": "ok", "message": "서버 전체 랭킹 갱신 완료"}
+
+
 @app.post("/api/update-guild-ranks")
 def update_guild_ranks():
     """친구 길드들의 서버 길드순위 크롤링 → guild_server_ranks 갱신 (수동 트리거)"""
