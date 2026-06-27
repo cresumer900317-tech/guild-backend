@@ -15,7 +15,7 @@ from scheduler import start_scheduler
 from schedule_logic import KST, build_schedule
 from push_send import _send  # Expo Push 발송 헬퍼(가입 문의 → 운영진 알림)
 from static_pages import PRIVACY_HTML, SUPPORT_HTML, TERMS_HTML, DELETE_ACCOUNT_HTML
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
 
 # JWT_SECRET 미설정 시 공개 소스의 기본값으로 토큰이 위조되는 걸 막기 위해
@@ -580,6 +580,155 @@ def get_server_ranking(limit: int = 3000):
         } for r in out]
     except Exception as e:
         print(f"[server-ranking] {e}")
+        return []
+
+
+# ══════════ 포인트/출석 시스템 ══════════
+# 적립: 매일 출석(+연속 보너스) + 게시판 글 작성. 사용처: 포인트 랭킹.
+# 테이블: user_points(character_name PK, guild, total, streak, last_checkin date), point_log(이력)
+_KST = timezone(timedelta(hours=9))
+POINTS_CHECKIN_BASE = 10        # 출석 기본
+POINTS_POST_FREE = 5           # 자유글 작성
+POINTS_POST_TIP = 10           # 팁 작성
+POINTS_BOARD_DAILY_CAP = 3     # 하루 게시판 적립 횟수 상한(파밍 방지)
+
+
+def _kst_now():
+    return datetime.now(_KST)
+
+
+def _member_guild(name: str):
+    try:
+        r = supabase.table("members").select("guild").eq("name", name).limit(1).execute()
+        return (r.data or [{}])[0].get("guild")
+    except Exception:
+        return None
+
+
+def _award_points(name: str, amount: int, reason: str, guild=None) -> int:
+    """user_points.total 증가 + point_log 기록. 새 total 반환."""
+    if guild is None:
+        guild = _member_guild(name)
+    cur = supabase.table("user_points").select("total").eq("character_name", name).limit(1).execute()
+    if cur.data:
+        new_total = (cur.data[0].get("total") or 0) + amount
+        supabase.table("user_points").update(
+            {"total": new_total, "guild": guild, "updated_at": _kst_now().isoformat()}
+        ).eq("character_name", name).execute()
+    else:
+        new_total = amount
+        supabase.table("user_points").insert(
+            {"character_name": name, "guild": guild, "total": amount}
+        ).execute()
+    supabase.table("point_log").insert({"character_name": name, "amount": amount, "reason": reason}).execute()
+    return new_total
+
+
+def _board_awards_today(name: str) -> int:
+    start = _kst_now().replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
+    try:
+        r = supabase.table("point_log").select("id").eq("character_name", name)\
+            .like("reason", "board:%").gte("created_at", start).execute()
+        return len(r.data or [])
+    except Exception:
+        return 0
+
+
+def award_board_points(name: str, kind: str, guild=None):
+    """게시판 글 작성 적립 — 하루 상한까지만. kind: 'free' | 'tip'. 실패해도 글 작성은 막지 않음."""
+    if not name:
+        return
+    try:
+        if _board_awards_today(name) >= POINTS_BOARD_DAILY_CAP:
+            return
+        amt = POINTS_POST_TIP if kind == "tip" else POINTS_POST_FREE
+        _award_points(name, amt, f"board:{kind}", guild)
+    except Exception as e:
+        print(f"[points] board award fail: {e}")
+
+
+@app.post("/api/points/checkin")
+def points_checkin(user: dict = Depends(get_current_user)):
+    """하루 1회 출석. 연속 출석 보너스 + 7일마다 마일스톤."""
+    name = user["character_name"]
+    today = _kst_now().date()
+    cur = supabase.table("user_points").select("*").eq("character_name", name).limit(1).execute()
+    row = (cur.data or [None])[0]
+
+    last = None
+    streak = 0
+    if row:
+        streak = row.get("streak") or 0
+        if row.get("last_checkin"):
+            try:
+                last = date.fromisoformat(str(row["last_checkin"])[:10])
+            except Exception:
+                last = None
+
+    if last == today:
+        return {"alreadyChecked": True, "awarded": 0,
+                "total": row.get("total") or 0, "streak": streak}
+
+    streak = streak + 1 if last == today - timedelta(days=1) else 1
+    base = POINTS_CHECKIN_BASE
+    streak_bonus = min(streak, 10) * 2          # 연속일수만큼(최대 +20/일)
+    milestone = 50 if streak % 7 == 0 else 0    # 7·14·21일… 보너스
+    awarded = base + streak_bonus + milestone
+    guild = _member_guild(name)
+
+    if row:
+        new_total = (row.get("total") or 0) + awarded
+        supabase.table("user_points").update({
+            "total": new_total, "streak": streak, "last_checkin": today.isoformat(),
+            "guild": guild, "updated_at": _kst_now().isoformat(),
+        }).eq("character_name", name).execute()
+    else:
+        new_total = awarded
+        supabase.table("user_points").insert({
+            "character_name": name, "guild": guild, "total": awarded,
+            "streak": streak, "last_checkin": today.isoformat(),
+        }).execute()
+    supabase.table("point_log").insert({"character_name": name, "amount": awarded, "reason": f"checkin:streak{streak}"}).execute()
+
+    return {"alreadyChecked": False, "awarded": awarded, "total": new_total,
+            "streak": streak, "base": base, "streakBonus": streak_bonus, "milestone": milestone}
+
+
+@app.get("/api/points/me")
+def points_me(user: dict = Depends(get_current_user)):
+    name = user["character_name"]
+    try:
+        cur = supabase.table("user_points").select("*").eq("character_name", name).limit(1).execute()
+        row = (cur.data or [None])[0]
+    except Exception as e:
+        print(f"[points] me {e}")
+        row = None
+    today = _kst_now().date()
+    checked = bool(row and row.get("last_checkin") and str(row["last_checkin"])[:10] == today.isoformat())
+    return {
+        "characterName": name,
+        "total": (row or {}).get("total") or 0,
+        "streak": (row or {}).get("streak") or 0,
+        "lastCheckin": (row or {}).get("last_checkin"),
+        "checkedToday": checked,
+    }
+
+
+@app.get("/api/points/ranking")
+def points_ranking(limit: int = 100):
+    """포인트 랭킹 (누적 총점 내림차순). 테이블 미생성 시 빈 배열."""
+    try:
+        r = supabase.table("user_points").select("character_name,guild,total,streak")\
+            .order("total", desc=True).limit(limit).execute()
+        return [{
+            "rank": i + 1,
+            "characterName": x.get("character_name"),
+            "guild": x.get("guild"),
+            "total": x.get("total") or 0,
+            "streak": x.get("streak") or 0,
+        } for i, x in enumerate(r.data or [])]
+    except Exception as e:
+        print(f"[points] ranking {e}")
         return []
 
 
@@ -1178,6 +1327,7 @@ def create_tip(req: TipCreate):
         "title": title, "content": content, "category": req.category,
         "author": req.author, "author_guild": req.author_guild, "likes": 0, "views": 0,
     }).execute()
+    award_board_points(req.author, "tip", req.author_guild)
     return result.data[0] if result.data else {}
 
 @app.get("/api/tips/{tip_id}")
@@ -1311,6 +1461,7 @@ def create_free_post(payload: dict):
         "author": author, "author_guild": author_guild,
         "likes": 0, "views": 0,
     }).execute()
+    award_board_points(author, "free", author_guild)
     return result.data[0] if result.data else {}
 
 @app.post("/api/free/{post_id}/like")
