@@ -501,6 +501,13 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
     results: list[dict] = []
     consec_fail = 0
     page = 1
+    # (임시 디버그) 출구 IP 확인
+    try:
+        _eip = _session.get("https://ipv4.icanhazip.com", proxies=SERVER_PROXY, timeout=15).text.strip()
+        print(f"[서버 전체][DBG] 프록시={'ON' if SERVER_PROXY else 'OFF'} 출구IP={_eip}")
+    except Exception as _e:
+        print(f"[서버 전체][DBG] 출구IP 확인실패: {repr(_e)[:120]}")
+    _dbg_done = False
     while page <= max_pages and len(results) < limit:
         url = SERVER_RANK_URL.format(page=page)
         try:
@@ -555,6 +562,12 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
                 break
 
         if page_count == 0:   # 빈 페이지 — 끝이거나 rate-limit 챌린지 페이지. 백오프 후 같은 page 재시도
+            if not _dbg_done:
+                _dbg_done = True
+                _low = html.lower()
+                print(f"[서버 전체][DBG] p{page} 빈결과: len={len(html)} table={'rank-table' in html} "
+                      f"cf={'cloudflare' in _low or 'cf-' in _low} cap={'captcha' in _low} "
+                      f"snip={html[:160].strip()!r}")
             consec_fail += 1
             backoff = min(3 * consec_fail, 20)
             print(f"[서버 전체] 페이지 {page} 빈 결과 (연속 {consec_fail}/{MAX_CONSEC}) → {backoff}s 후 재시도")
