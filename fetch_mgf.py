@@ -36,13 +36,14 @@ HEADERS = {
 _session = requests.Session()
 _session.headers.update(HEADERS)
 
-# 거주지 프록시(선택): 환경변수 PROXY_URL 이 있으면 모든 mgf 요청을 그 프록시로 우회한다.
-# 용도: 데이터센터 IP(Railway)가 mgf rate-limit에 막히는 문제 회피 → 서버 전체 풀크롤 가능.
-# 미설정 시 직접 연결(기존 동작 그대로, 영향 없음). 형식: http://user:pass@host:port
+# 거주지 프록시(선택): PROXY_URL 이 있으면 "서버 전체 풀크롤(fetch_server_top)"에만 적용한다.
+# 멤버/보스/인기도/길드 크롤은 페이지가 적어 데이터센터 IP로도 충분 → 직접 연결 유지.
+# (전부 프록시로 돌리면 동시 크롤들이 프록시를 한꺼번에 때려 혼잡 + 프록시 비용 급증)
+# 미설정 시 전부 직접 연결(기존 동작). 형식: http://user:pass@host:port
 _proxy_url = os.environ.get("PROXY_URL", "").strip()
-if _proxy_url:
-    _session.proxies.update({"http": _proxy_url, "https": _proxy_url})
-    print(f"[fetch_mgf] PROXY_URL 적용됨 (호스트: {_proxy_url.split('@')[-1] if '@' in _proxy_url else _proxy_url})")
+SERVER_PROXY = {"http": _proxy_url, "https": _proxy_url} if _proxy_url else None
+if SERVER_PROXY:
+    print(f"[fetch_mgf] 서버 풀크롤 전용 프록시 적용 (호스트: {_proxy_url.split('@')[-1] if '@' in _proxy_url else _proxy_url})")
 
 def safe_filename(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", name)
@@ -51,11 +52,11 @@ def save_debug_html(guild_name: str, html: str) -> None:
     filename = Path(__file__).resolve().parent / f"debug_guild_{safe_filename(guild_name)}.html"
     filename.write_text(html, encoding="utf-8")
 
-def fetch_page(url: str, retries: int = 1) -> str:
+def fetch_page(url: str, retries: int = 1, proxies=None) -> str:
     last_error = None
     for _ in range(retries + 1):
         try:
-            res = _session.get(url, timeout=REQUEST_TIMEOUT)
+            res = _session.get(url, timeout=REQUEST_TIMEOUT, proxies=proxies)
             res.raise_for_status()
             res.encoding = "utf-8"
             return res.text
@@ -503,7 +504,7 @@ def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
     while page <= max_pages and len(results) < limit:
         url = SERVER_RANK_URL.format(page=page)
         try:
-            html = fetch_page(url, retries=2)
+            html = fetch_page(url, retries=2, proxies=SERVER_PROXY)
         except Exception as e:
             consec_fail += 1
             backoff = min(3 * consec_fail, 20)   # 3,6,9…최대 20초
