@@ -556,7 +556,18 @@ def get_guild_ranks():
 def get_server_ranking(limit: int = 3000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
     try:
-        data = supabase.table("server_ranking").select("*").order("server_rank").range(0, limit - 1).execute()
+        # PostgREST 기본 max-rows(1000) 캡 우회 — 1000행씩 끊어 누적
+        out = []
+        step = 1000
+        start = 0
+        while start < limit:
+            end = min(start + step, limit) - 1
+            res = supabase.table("server_ranking").select("*").order("server_rank").range(start, end).execute()
+            batch = res.data or []
+            out.extend(batch)
+            if len(batch) < (end - start + 1):   # 마지막 페이지 도달
+                break
+            start += step
         return [{
             "serverRank": r.get("server_rank"),
             "nickname": r.get("nickname"),
@@ -566,7 +577,7 @@ def get_server_ranking(limit: int = 3000):
             "popularity": r.get("popularity"),
             "level": r.get("level"),
             "job": r.get("job"),
-        } for r in (data.data or [])]
+        } for r in out]
     except Exception as e:
         print(f"[server-ranking] {e}")
         return []
