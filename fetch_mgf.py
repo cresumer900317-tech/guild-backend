@@ -476,6 +476,72 @@ def fetch_server_ranking(member_names: set[str], max_pages: int = 150) -> dict[s
     return found
 
 
+# ── 서버 전체 랭킹 Top-N 수집 (전투력순, 길드 무관) ──────────────
+# index.php는 30행/페이지. 3000명 = 100페이지. 멤버 필터 없이 상위 N명을 전부 수집한다.
+def fetch_server_top(limit: int = 3000, max_pages: int = 110) -> list[dict]:
+    """
+    스카니아11 전투력 랭킹(index.php)을 순회하며 상위 limit명을 길드 무관 전부 수집.
+    반환: [{"server_rank","nickname","guild","power","power_text","popularity","level","job"}...]
+    """
+    results: list[dict] = []
+    for page in range(1, max_pages + 1):
+        if len(results) >= limit:
+            break
+        url = SERVER_RANK_URL.format(page=page)
+        try:
+            html = fetch_page(url, retries=2)
+        except Exception as e:
+            print(f"[서버 전체] 페이지 {page} 오류: {e}")
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select("table.rank-table tr")
+
+        page_count = 0
+        for row in rows:
+            nick_el = row.select_one("span.nickname")
+            rank_el = row.select_one("span.rank-total")
+            if not nick_el or not rank_el:
+                continue
+            server_rank = parse_number(rank_el.get_text(strip=True))
+            if not server_rank:
+                continue
+
+            guild_el = row.select_one(".badge-guild")
+            guild = guild_el.get_text(strip=True) if guild_el else ""
+            pow_el = row.select_one(".power-tooltip") or row.select_one(".power-kor")
+            power_text = pow_el.get_text(strip=True) if pow_el else ""
+            power = convert_korean_power_to_int(power_text) if power_text else 0
+            pop_el = row.select_one("span.badge-pop")
+            popularity = parse_number(pop_el.get_text(strip=True)) if pop_el else 0
+            level_el = row.select_one("span.level")
+            level = parse_number(level_el.get_text(strip=True)) if level_el else 0
+            job_el = row.select_one("span.job-name")
+            job = job_el.get_text(strip=True) if job_el else ""
+
+            results.append({
+                "server_rank": server_rank,
+                "nickname": nick_el.get_text(strip=True),
+                "guild": guild,
+                "power": power,
+                "power_text": power_text,
+                "popularity": popularity,
+                "level": level,
+                "job": job,
+            })
+            page_count += 1
+            if len(results) >= limit:
+                break
+
+        if page_count == 0:   # 빈 페이지(끝) → 종료
+            break
+        time.sleep(REQUEST_DELAY_SECONDS)
+
+    results.sort(key=lambda x: x["server_rank"])
+    print(f"[서버 전체] 수집 완료: {len(results)}명")
+    return results
+
+
 # ── 토벌전 / 월드보스 랭킹 (멤버별 점수 + 서버순위) ──────────────
 # index.php와 동일한 행 구조 + score-cell(점수). 상세 페이지 대신 목록에서 추출.
 BOSS_RANK_URLS = {

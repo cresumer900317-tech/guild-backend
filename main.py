@@ -544,6 +544,26 @@ def get_guild_ranks():
     } for r in (data.data or [])]
 
 
+@app.get("/api/server-ranking")
+def get_server_ranking(limit: int = 3000):
+    """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
+    try:
+        data = supabase.table("server_ranking").select("*").order("server_rank").range(0, limit - 1).execute()
+        return [{
+            "serverRank": r.get("server_rank"),
+            "nickname": r.get("nickname"),
+            "guild": r.get("guild"),
+            "power": r.get("power"),
+            "powerText": r.get("power_text"),
+            "popularity": r.get("popularity"),
+            "level": r.get("level"),
+            "job": r.get("job"),
+        } for r in (data.data or [])]
+    except Exception as e:
+        print(f"[server-ranking] {e}")
+        return []
+
+
 @app.get("/api/rivals")
 def get_rivals():
     """

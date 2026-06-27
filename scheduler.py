@@ -270,6 +270,29 @@ def run_guild_rank_update():
         logger.error(f"[길드 랭킹] 오류: {e}")
 
 
+def run_server_top_update():
+    """스카니아11 서버 전체 랭킹 Top-N 크롤 → server_ranking 테이블 전량 교체 (6시간마다)"""
+    logger.info("=== [서버 전체] 업데이트 시작 ===")
+    try:
+        from fetch_mgf import fetch_server_top
+        rows = fetch_server_top(limit=3000)
+        # 크롤 실패(부분 수집) 시 기존 데이터 보존 — 빈/반쪽 교체 방지
+        if len(rows) < 100:
+            logger.info(f"[서버 전체] 수집 {len(rows)}명뿐 → 교체 건너뜀(기존 유지)")
+            return
+        now = datetime.now().isoformat()
+        for r in rows:
+            r["captured_at"] = now
+        # 전량 교체 (server_rank PK)
+        supabase.table("server_ranking").delete().neq("server_rank", 0).execute()
+        CHUNK = 500
+        for i in range(0, len(rows), CHUNK):
+            supabase.table("server_ranking").insert(rows[i:i + CHUNK]).execute()
+        logger.info(f"=== [서버 전체] 완료: {len(rows)}명 저장 ===")
+    except Exception as e:
+        logger.error(f"[서버 전체] 오류: {e}")
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler()
 
@@ -291,6 +314,13 @@ def start_scheduler():
     # 1시간마다 토벌전/월드보스 순위 + 길드 서버순위 업데이트 — 시작 시 즉시 1회
     scheduler.add_job(run_boss_rank_update, IntervalTrigger(hours=1), next_run_time=now)
     scheduler.add_job(run_guild_rank_update, IntervalTrigger(hours=1), next_run_time=now)
+
+    # 서버 전체 랭킹(3000명)은 무거우니 6시간마다 + 시작 직후 1회
+    scheduler.add_job(
+        run_server_top_update,
+        IntervalTrigger(hours=6),
+        next_run_time=datetime.now(),
+    )
 
     # 매달 1일 00:05에 크롤링 + 월간 스냅샷 저장
     scheduler.add_job(
