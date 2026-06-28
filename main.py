@@ -1078,36 +1078,36 @@ def delete_contribution(month: str, guild_name: str, member_name: str, admin: di
 
 @app.post("/api/auth/register")
 def register(req: AuthRequest):
-    """회원가입"""
-    character_name = req.character_name
+    """회원가입 — 스카니아11 라운지.
+    친구 길드원이거나 server_ranking에 등재된 실제 스카니아11 캐릭터면 즉시 가입(라운지 회원).
+    (도용 방지: 실존 캐릭만 + 캐릭당 1계정 + 분쟁 시 운영진 회수)"""
+    import unicodedata
+    character_name = unicodedata.normalize("NFC", (req.character_name or "").strip())
     password = req.password
 
     if not character_name or not password:
         raise HTTPException(status_code=400, detail="캐릭터명과 비밀번호를 입력해주세요")
     if len(password) < 4:
         raise HTTPException(status_code=400, detail="비밀번호는 4자 이상이어야 합니다")
-    if not req.email or not req.email.strip():
-        raise HTTPException(status_code=400, detail="이메일을 입력해주세요")
-    if not req.birthdate or not req.birthdate.strip():
-        raise HTTPException(status_code=400, detail="생년월일을 입력해주세요")
 
-    # 캐릭터명이 실제 길드원인지 확인
-    member_result = supabase.table("members")        .select("name, guild")        .eq("name", character_name)        .execute()
-    if not member_result.data:
-        raise HTTPException(status_code=404, detail="등록된 길드원이 아닙니다. 캐릭터명을 확인해주세요")
+    # 1) 친구 길드원인지 확인 → 길드 혜택 부여
+    member_result = supabase.table("members").select("name, guild").eq("name", character_name).execute()
+    if member_result.data:
+        guild = member_result.data[0].get("guild", "") or ""
+    else:
+        # 2) 친구 길드원이 아니면, 실제 스카니아11 서버 캐릭터인지 확인 → 라운지 회원
+        sr = supabase.table("server_ranking").select("nickname, guild").eq("nickname", character_name).limit(1).execute()
+        if not sr.data:
+            raise HTTPException(status_code=404, detail="스카니아11 서버에서 찾을 수 없는 캐릭터예요. 캐릭터명을 정확히 입력해주세요. (본인 캐릭터만 가입할 수 있어요)")
+        guild = sr.data[0].get("guild", "") or ""
 
-    member = member_result.data[0]
-
-    # 이미 가입된 계정인지 확인
-    existing = supabase.table("users")        .select("id, status")        .eq("character_name", character_name)        .execute()
+    # 이미 가입된 캐릭터인지 확인 (캐릭당 1계정)
+    existing = supabase.table("users").select("id, status").eq("character_name", character_name).execute()
     if existing.data:
         status = existing.data[0]["status"]
-        if status == "pending":
-            raise HTTPException(status_code=409, detail="이미 가입 신청이 접수됐습니다. 운영진 승인을 기다려주세요")
-        elif status == "active":
-            raise HTTPException(status_code=409, detail="이미 가입된 계정입니다")
-        elif status == "inactive":
+        if status == "inactive":
             raise HTTPException(status_code=403, detail="비활성화된 계정입니다. 운영진에게 문의해주세요")
+        raise HTTPException(status_code=409, detail="이미 가입된 캐릭터입니다. 본인 캐릭터인데 가입한 적 없다면 운영진에게 문의해주세요(도용 의심)")
 
     # 비밀번호 해시
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -1115,18 +1115,25 @@ def register(req: AuthRequest):
     user_data = {
         "character_name": character_name,
         "password_hash": pw_hash,
-        "guild": member.get("guild", ""),
-        "status": "pending",
+        "guild": guild,
+        "status": "active",   # 즉시 가입 (운영진 승인 불필요)
         "role": "member",
     }
-    if req.email:
+    if req.email and req.email.strip():
         user_data["email"] = req.email.strip()
-    if req.birthdate:
+    if req.birthdate and req.birthdate.strip():
         user_data["birthdate"] = req.birthdate.strip()
 
     supabase.table("users").insert(user_data).execute()
 
-    return {"status": "ok", "message": "가입 신청이 완료됐습니다. 운영진 승인 후 이용 가능합니다"}
+    # 가입 즉시 로그인 토큰 발급 (바로 이용)
+    token = create_access_token(character_name, "member")
+    return {
+        "status": "ok",
+        "message": "가입 완료! 바로 이용할 수 있어요.",
+        "token": token,
+        "user": {"character_name": character_name, "guild": guild, "role": "member", "status": "active"},
+    }
 
 
 @app.post("/api/auth/login")
