@@ -583,6 +583,34 @@ def get_server_ranking(limit: int = 7000):
         return []
 
 
+@app.get("/api/server-ranking/history")
+def get_server_ranking_history(name: str, days: int = 90):
+    """특정 캐릭터의 일별 서버랭킹 이력 (프로필 성장 그래프용).
+    오래된→최신 순으로 최근 `days`일치 반환. 테이블 미생성/데이터 없음 시 빈 배열."""
+    import unicodedata
+    nm = unicodedata.normalize("NFC", (name or "").strip())
+    if not nm:
+        return []
+    try:
+        res = (supabase.table("server_ranking_history")
+               .select("snapshot_date,server_rank,power,popularity,guild")
+               .eq("name", nm)
+               .order("snapshot_date", desc=True)
+               .limit(max(1, min(days, 365)))
+               .execute())
+        rows = list(reversed(res.data or []))   # desc로 받아 최신 N개 → 시간순 정렬
+        return [{
+            "date": r.get("snapshot_date"),
+            "serverRank": r.get("server_rank"),
+            "power": r.get("power"),
+            "popularity": r.get("popularity"),
+            "guild": r.get("guild"),
+        } for r in rows]
+    except Exception as e:
+        print(f"[server-ranking-history] {e}")
+        return []
+
+
 # ══════════ 포인트/출석 시스템 ══════════
 # 적립: 매일 출석(+연속 보너스) + 게시판 글 작성. 사용처: 포인트 랭킹.
 # 테이블: user_points(character_name PK, guild, total, streak, last_checkin date), point_log(이력)
