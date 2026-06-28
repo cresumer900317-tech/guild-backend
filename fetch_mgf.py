@@ -823,6 +823,25 @@ def fetch_server_guild_top(limit: int = 30, max_pages: int = 12) -> list[dict]:
     return results
 
 
+def fetch_guild_member_powers(guild_name: str) -> list[int]:
+    """길드 페이지에서 멤버 전투력만 경량 추출(상세페이지 호출 X). 길드 전력 균형 점수용."""
+    url = "https://mgf.gg/contents/guild_info.php?g_name=" + requests.utils.quote(guild_name)
+    try:
+        html = fetch_page(url, retries=1)
+    except Exception:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    powers: list[int] = []
+    for row in soup.select(".members-list .member-row"):
+        pe = row.select_one(".power-tooltip") or row.select_one(".power-text")
+        if not pe:
+            continue
+        p = convert_korean_power_to_int(pe.get_text(" ", strip=True))
+        if p > 0:
+            powers.append(p)
+    return powers
+
+
 def fetch_rival_guilds() -> tuple[list[dict], list[dict]]:
     """경쟁 길드 데이터 수집 → (길드 요약 리스트, 멤버 리스트)"""
     summaries = []

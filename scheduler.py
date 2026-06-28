@@ -275,17 +275,28 @@ def run_server_guild_update():
     길드 랭킹 페이지는 가벼워(상위 30개=몇 페이지) 프록시 없이 직접 연결. 테이블 없으면 조용히 스킵."""
     logger.info("=== [서버 길드] 업데이트 시작 ===")
     try:
-        from fetch_mgf import fetch_server_guild_top
+        import time as _time
+        from fetch_mgf import fetch_server_guild_top, fetch_guild_member_powers
         rows = fetch_server_guild_top(limit=30, max_pages=12)
         if len(rows) < 3:
             logger.info(f"[서버 길드] 수집 {len(rows)}개뿐 → 교체 건너뜀(기존 유지)")
             return
         now = datetime.now().isoformat()
+        # 각 길드 멤버 전투력 추가 수집 → 전력 균형(top/low/avg) 계산
         for r in rows:
             r["captured_at"] = now
+            try:
+                powers = fetch_guild_member_powers(r["guild_name"])
+                if powers:
+                    r["top_power"] = max(powers)
+                    r["low_power"] = min(powers)
+                    r["avg_member_power"] = sum(powers) // len(powers)
+            except Exception as me:
+                logger.warning(f"[서버 길드] {r.get('guild_name')} 멤버 전투력 수집 실패: {repr(me)[:80]}")
+            _time.sleep(0.4)
         supabase.table("server_guild_ranking").delete().neq("guild_rank", 0).execute()
         supabase.table("server_guild_ranking").insert(rows).execute()
-        logger.info(f"=== [서버 길드] 완료: {len(rows)}개 저장 ===")
+        logger.info(f"=== [서버 길드] 완료: {len(rows)}개 저장(균형 포함) ===")
     except Exception as e:
         logger.error(f"[서버 길드] 오류: {e}")
 

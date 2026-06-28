@@ -564,6 +564,9 @@ def get_server_guild_ranking(limit: int = 30):
             "level": r.get("level"),
             "members": r.get("members"),
             "power": r.get("power"),
+            "topPower": r.get("top_power"),
+            "lowPower": r.get("low_power"),
+            "avgMemberPower": r.get("avg_member_power"),
             "capturedAt": r.get("captured_at"),
         } for r in (res.data or [])]
     except Exception as e:
