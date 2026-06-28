@@ -579,6 +579,36 @@ def update_server_guild_ranking():
     return {"status": "ok", "message": "서버 길드 랭킹 갱신 완료"}
 
 
+@app.get("/api/server-boss-ranking")
+def get_server_boss_ranking(kind: str = "guild_boss", limit: int = 100):
+    """스카니아11 서버 전체 보스 랭킹. kind: guild_boss(토벌전)/world_boss(월드보스). 테이블/데이터 없음 시 빈 배열."""
+    if kind not in ("guild_boss", "world_boss"):
+        kind = "guild_boss"
+    try:
+        res = (supabase.table("server_boss_ranking").select("*")
+               .eq("kind", kind).order("server_rank").limit(max(1, min(limit, 200))).execute())
+        return [{
+            "serverRank": r.get("server_rank"),
+            "nickname": r.get("nickname"),
+            "guild": r.get("guild"),
+            "score": r.get("score"),
+            "scoreText": r.get("score_text"),
+            "level": r.get("level"),
+            "job": r.get("job"),
+        } for r in (res.data or [])]
+    except Exception as e:
+        print(f"[server-boss-ranking] {e}")
+        return []
+
+
+@app.post("/api/update-server-boss-ranking")
+def update_server_boss_ranking():
+    """서버 전체 보스 랭킹(토벌전·월드보스) 수동 갱신 트리거. 테이블 생성 후 호출."""
+    from scheduler import run_server_boss_update
+    run_server_boss_update()
+    return {"status": "ok", "message": "서버 보스 랭킹 갱신 완료"}
+
+
 @app.get("/api/server-ranking")
 def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""

@@ -661,6 +661,60 @@ def fetch_boss_ranking(member_names: set[str], kind: str, max_pages: int = 150) 
     return found
 
 
+def fetch_boss_top(kind: str, limit: int = 100, max_pages: int = 60) -> list[dict]:
+    """kind: 'guild_boss'(토벌전) / 'world_boss'(월드보스). 서버 전체 상위 limit명(길드 무관).
+    반환: [{server_rank, nickname, guild, score, score_text, level, job}...]"""
+    url_tpl = BOSS_RANK_URLS[kind]
+    results: list[dict] = []
+    seen: set = set()
+    for page in range(1, max_pages + 1):
+        if len(results) >= limit:
+            break
+        try:
+            html = fetch_page(url_tpl.format(page=page), retries=2)
+        except Exception as e:
+            print(f"[{kind} top] 페이지 {page} 오류: {e}")
+            break
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select("table.rank-table tr")
+        page_count = 0
+        for row in rows:
+            nick_el = row.select_one("span.nickname")
+            rank_el = row.select_one("span.rank-total")
+            if not nick_el or not rank_el:
+                continue
+            rank = parse_number(rank_el.get_text(strip=True))
+            if not rank:
+                continue
+            nm = nick_el.get_text(strip=True)
+            key = (rank, nm)
+            if key in seen:
+                continue
+            guild_el = row.select_one(".badge-guild")
+            guild = guild_el.get_text(strip=True) if guild_el else ""
+            score_el = row.select_one(".score-tooltip") or row.select_one(".score-kor")
+            score_text = score_el.get_text(strip=True) if score_el else ""
+            score = convert_korean_power_to_int(score_text) if score_text else 0
+            level_el = row.select_one("span.level")
+            level = parse_number(level_el.get_text(strip=True)) if level_el else 0
+            job_el = row.select_one("span.job-name")
+            job = job_el.get_text(strip=True) if job_el else ""
+            seen.add(key)
+            results.append({
+                "server_rank": rank, "nickname": nm, "guild": guild,
+                "score": score, "score_text": score_text, "level": level, "job": job,
+            })
+            page_count += 1
+            if len(results) >= limit:
+                break
+        if page_count == 0:
+            break
+        time.sleep(REQUEST_DELAY_SECONDS)
+    results.sort(key=lambda x: x["server_rank"])
+    print(f"[{kind} top] 수집 완료: {len(results)}명")
+    return results
+
+
 # ── 우리 친구 길드들의 서버 길드 랭킹 ───────────────────────────
 GUILD_RANK_URL = "https://mgf.gg/ranking/guild_ranking.php?server=11&page={page}"
 ACTUAL_FRIEND_GUILDS = {"친구들", "친구둘", "친구삼", "친구넷"}  # 실제 길드(친구닷=캐릭터 제외)
