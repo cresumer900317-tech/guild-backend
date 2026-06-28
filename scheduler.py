@@ -270,6 +270,26 @@ def run_guild_rank_update():
         logger.error(f"[길드 랭킹] 오류: {e}")
 
 
+def run_server_guild_update():
+    """스카니아11 서버 전체 길드 랭킹 Top-N 크롤 → server_guild_ranking 전량 교체.
+    길드 랭킹 페이지는 가벼워(상위 30개=몇 페이지) 프록시 없이 직접 연결. 테이블 없으면 조용히 스킵."""
+    logger.info("=== [서버 길드] 업데이트 시작 ===")
+    try:
+        from fetch_mgf import fetch_server_guild_top
+        rows = fetch_server_guild_top(limit=30, max_pages=12)
+        if len(rows) < 3:
+            logger.info(f"[서버 길드] 수집 {len(rows)}개뿐 → 교체 건너뜀(기존 유지)")
+            return
+        now = datetime.now().isoformat()
+        for r in rows:
+            r["captured_at"] = now
+        supabase.table("server_guild_ranking").delete().neq("guild_rank", 0).execute()
+        supabase.table("server_guild_ranking").insert(rows).execute()
+        logger.info(f"=== [서버 길드] 완료: {len(rows)}개 저장 ===")
+    except Exception as e:
+        logger.error(f"[서버 길드] 오류: {e}")
+
+
 def run_server_top_update():
     """스카니아11 서버 전체 랭킹 Top-N 크롤 → server_ranking 테이블 전량 교체 (하루 2회)"""
     logger.info("=== [서버 전체] 업데이트 시작 ===")
@@ -342,6 +362,9 @@ def start_scheduler():
     # 1시간마다 토벌전/월드보스 순위 + 길드 서버순위 업데이트 — 시작 시 즉시 1회
     scheduler.add_job(run_boss_rank_update, IntervalTrigger(hours=1), next_run_time=now)
     scheduler.add_job(run_guild_rank_update, IntervalTrigger(hours=1), next_run_time=now)
+
+    # 6시간마다 스카니아11 서버 전체 길드 랭킹 Top30 — 시작 직후 1회 (가벼워 프록시 불필요)
+    scheduler.add_job(run_server_guild_update, IntervalTrigger(hours=6), next_run_time=now)
 
     # 서버 전체 랭킹(~6800명)은 무겁고 mgf 부담을 줄이려 하루 2회(12h) + 시작 직후 1회.
     # PROXY_URL 미설정 시 Railway IP는 ~960에서 막혀 가드가 교체를 스킵(기존 데이터 보존).

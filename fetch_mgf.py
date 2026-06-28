@@ -721,6 +721,54 @@ def fetch_guild_server_ranks(max_pages: int = 100) -> dict[str, dict]:
     return found
 
 
+def fetch_server_guild_top(limit: int = 30, max_pages: int = 12) -> list[dict]:
+    """스카니아11 길드 서버순위 상위 limit개 (길드 무관 전부).
+    fetch_guild_server_ranks와 같은 페이지(.guild-name/.rank-cell/.guild-level/.power-tooltip) 파싱.
+    반환: [{"guild_rank","guild_name","level","members","power"}...]"""
+    results: list[dict] = []
+    seen: set[str] = set()
+    for page in range(1, max_pages + 1):
+        if len(results) >= limit:
+            break
+        try:
+            html = fetch_page(GUILD_RANK_URL.format(page=page), retries=2)
+        except Exception as e:
+            print(f"[서버 길드] 페이지 {page} 오류: {e}")
+            break
+        soup = BeautifulSoup(html, "html.parser")
+        rows = soup.select("table.rank-table tr")
+        page_count = 0
+        for row in rows:
+            gname_el = row.select_one(".guild-name")
+            if not gname_el:
+                continue
+            gname = norm_name(gname_el.get_text(strip=True))
+            if not gname or gname in seen:
+                continue
+            rank_el = row.select_one(".rank-cell")
+            rank = parse_number(rank_el.get_text(strip=True)) if rank_el else 0
+            if not rank:
+                continue
+            level_el = row.select_one(".guild-level")
+            level = parse_number(level_el.get_text(strip=True)) if level_el else 0
+            power_el = row.select_one(".power-tooltip")
+            power = convert_korean_power_to_int(power_el.get_text(strip=True)) if power_el else 0
+            mm = re.search(r"(\d+)\s*명", row.get_text(" ", strip=True))
+            members = int(mm.group(1)) if mm else 0
+            seen.add(gname)
+            results.append({"guild_rank": rank, "guild_name": gname,
+                            "level": level, "members": members, "power": power})
+            page_count += 1
+            if len(results) >= limit:
+                break
+        if page_count == 0:
+            break
+        time.sleep(REQUEST_DELAY_SECONDS)
+    results.sort(key=lambda x: x["guild_rank"])
+    print(f"[서버 길드] 수집 완료: {len(results)}개")
+    return results
+
+
 def fetch_rival_guilds() -> tuple[list[dict], list[dict]]:
     """경쟁 길드 데이터 수집 → (길드 요약 리스트, 멤버 리스트)"""
     summaries = []

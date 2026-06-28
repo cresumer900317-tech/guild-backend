@@ -552,6 +552,33 @@ def get_guild_ranks():
     } for r in (data.data or [])]
 
 
+@app.get("/api/server-guild-ranking")
+def get_server_guild_ranking(limit: int = 30):
+    """스카니아11 서버 전체 길드 랭킹 (서버순위 오름차순). 테이블 미생성/데이터 없음 시 빈 배열."""
+    try:
+        res = (supabase.table("server_guild_ranking").select("*")
+               .order("guild_rank").limit(max(1, min(limit, 100))).execute())
+        return [{
+            "guildRank": r.get("guild_rank"),
+            "guildName": r.get("guild_name"),
+            "level": r.get("level"),
+            "members": r.get("members"),
+            "power": r.get("power"),
+            "capturedAt": r.get("captured_at"),
+        } for r in (res.data or [])]
+    except Exception as e:
+        print(f"[server-guild-ranking] {e}")
+        return []
+
+
+@app.post("/api/update-server-guild-ranking")
+def update_server_guild_ranking():
+    """서버 전체 길드 랭킹 수동 갱신 트리거. 테이블 생성 후 호출."""
+    from scheduler import run_server_guild_update
+    run_server_guild_update()
+    return {"status": "ok", "message": "서버 길드 랭킹 갱신 완료"}
+
+
 @app.get("/api/server-ranking")
 def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
