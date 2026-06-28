@@ -609,6 +609,17 @@ def update_server_boss_ranking():
     return {"status": "ok", "message": "서버 보스 랭킹 갱신 완료"}
 
 
+@app.get("/api/server-stats")
+def get_server_stats():
+    """스카니아11 서버 요약 통계 (홈 히어로용). server_ranking 등재 전체 인원."""
+    try:
+        cnt = supabase.table("server_ranking").select("server_rank", count="exact").limit(1).execute().count or 0
+    except Exception as e:
+        print(f"[server-stats] {e}")
+        cnt = 0
+    return {"totalPlayers": cnt}
+
+
 @app.get("/api/server-ranking")
 def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
