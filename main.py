@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 from typing import Optional, Literal
 import json
 import os
+import time as _time
+import unicodedata
 import secrets as _secrets
 import jwt
 from pydantic import BaseModel, field_validator, Field
@@ -24,6 +26,47 @@ from zoneinfo import ZoneInfo
 JWT_SECRET = os.environ.get("JWT_SECRET") or _secrets.token_hex(32)
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = 24
+
+
+# ── 응답 캐시 ─────────────────────────────────────────────────────
+# server_ranking 등 무거운 읽기는 데이터가 크롤(수~12시간)때만 바뀌므로 메모리 TTL 캐시로 반복 DB 읽기 제거.
+_resp_cache = {}   # key -> (timestamp, value)
+
+def cache_get(key, ttl):
+    e = _resp_cache.get(key)
+    if e and (_time.time() - e[0]) < ttl:
+        return e[1]
+    return None
+
+def cache_set(key, value):
+    _resp_cache[key] = (_time.time(), value)
+    return value
+
+def cache_clear(*keys):
+    for k in keys:
+        _resp_cache.pop(k, None)
+
+def _nfc(s):
+    return unicodedata.normalize("NFC", str(s or "")).strip()
+
+POP_ACTIVE = 50   # 길드 건강도 '활동' 기준: 인기도 ≥50 멤버를 활동 멤버로 집계
+
+
+def load_server_ranking_rows(limit: int = 7000):
+    """server_ranking 전체 행을 읽어 캐시(10분). server-ranking·guild-health 가 공유."""
+    cached = cache_get("server_ranking_rows", 600)
+    if cached is not None:
+        return cached
+    out, step, start = [], 1000, 0
+    while start < limit:
+        end = min(start + step, limit) - 1
+        res = supabase.table("server_ranking").select("*").order("server_rank").range(start, end).execute()
+        batch = res.data or []
+        out.extend(batch)
+        if len(batch) < (end - start + 1):
+            break
+        start += step
+    return cache_set("server_ranking_rows", out)
 
 
 def create_access_token(character_name: str, role: str) -> str:
@@ -459,6 +502,9 @@ def get_monthly():
 
 @app.get("/api/home-summary")
 def get_home_summary():
+    cached = cache_get("home_summary", 300)   # 데이터는 크롤(시간단위)때만 변경 → 5분 캐시
+    if cached is not None:
+        return cached
     members = fetch_members_raw()
     if not members:
         return {
@@ -489,14 +535,14 @@ def get_home_summary():
             diff = (best.get("power") or 0) - snap_map.get(best["name"], best.get("power") or 0)
             top_growth = {"name": best["name"], "diff": diff}
 
-    return {
+    return cache_set("home_summary", {
         "guild_name": "친구패밀리",
         "guild_count": len(guilds),
         "member_count": len(members),
         "avg_power": avg_power,
         "avg_server_rank": avg_rank,
         "top_monthly_growth": top_growth,
-    }
+    })
 
 
 @app.post("/api/crawl")
@@ -574,6 +620,45 @@ def get_server_guild_ranking(limit: int = 30):
         return []
 
 
+@app.get("/api/guild-health")
+def get_guild_health(limit: int = 30):
+    """길드 건강도용 경량 집계 — 길드별 멤버 분포(중앙값·유효기여자수·활동비율)를 서버에서 계산.
+    프론트가 server-ranking 전체(1MB+)를 받지 않도록 통계만 반환. 캐시 5분."""
+    ckey = f"guild_health_{limit}"
+    cached = cache_get(ckey, 300)
+    if cached is not None:
+        return cached
+    try:
+        guilds = get_server_guild_ranking(limit)
+        members = load_server_ranking_rows()
+    except Exception as e:
+        print(f"[guild-health] {e}")
+        return []
+    by = {}
+    for m in members:
+        g = _nfc(m.get("guild"))
+        if g:
+            by.setdefault(g, []).append(m)
+    out = []
+    for g in guilds:
+        ms = by.get(_nfc(g.get("guildName")), [])
+        powers = sorted(p for p in (int(m.get("power") or 0) for m in ms) if p > 0)
+        pops = [int(m.get("popularity") or 0) for m in ms]
+        n = len(powers)
+        median = (powers[n // 2] if n % 2 else (powers[n // 2 - 1] + powers[n // 2]) / 2) if n else 0
+        tot = sum(powers)
+        eff = (1.0 / sum((p / tot) ** 2 for p in powers)) if tot else 0
+        active_ratio = (sum(1 for p in pops if p >= POP_ACTIVE) / len(pops)) if pops else None
+        out.append({
+            **g,
+            "memberSampled": n,
+            "medianPower": median,
+            "effContributors": round(eff, 2),
+            "activeRatio": round(active_ratio, 4) if active_ratio is not None else None,
+        })
+    return cache_set(ckey, out)
+
+
 @app.post("/api/update-server-guild-ranking")
 def update_server_guild_ranking():
     """서버 전체 길드 랭킹 수동 갱신 트리거. 테이블 생성 후 호출."""
@@ -627,18 +712,8 @@ def get_server_stats():
 def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
     try:
-        # PostgREST 기본 max-rows(1000) 캡 우회 — 1000행씩 끊어 누적
-        out = []
-        step = 1000
-        start = 0
-        while start < limit:
-            end = min(start + step, limit) - 1
-            res = supabase.table("server_ranking").select("*").order("server_rank").range(start, end).execute()
-            batch = res.data or []
-            out.extend(batch)
-            if len(batch) < (end - start + 1):   # 마지막 페이지 도달
-                break
-            start += step
+        # 무거운 6800행 읽기는 캐시 사용(데이터는 크롤때만 변경). PostgREST 1000행 캡은 로더가 우회.
+        out = load_server_ranking_rows(limit)
         return [{
             "serverRank": r.get("server_rank"),
             "nickname": r.get("nickname"),
@@ -1430,8 +1505,11 @@ def realtime_token(user: dict = Depends(get_current_user)):
 
 @app.get("/api/notices")
 def get_notices():
+    cached = cache_get("notices", 60)
+    if cached is not None:
+        return cached
     result = supabase.table("notices")        .select("*")        .order("is_pinned", desc=True)        .order("created_at", desc=True)        .execute()
-    return result.data or []
+    return cache_set("notices", result.data or [])
 
 @app.post("/api/notices")
 def create_notice(req: NoticeCreate, admin: dict = Depends(require_admin)):
@@ -1443,11 +1521,13 @@ def create_notice(req: NoticeCreate, admin: dict = Depends(require_admin)):
         "title": title, "content": content, "category": req.category,
         "author": req.author, "author_guild": req.author_guild, "is_pinned": req.is_pinned,
     }).execute()
+    cache_clear("notices")
     return result.data[0] if result.data else {}
 
 @app.delete("/api/notices/{notice_id}")
 def delete_notice(notice_id: int, admin: dict = Depends(require_admin)):
     supabase.table("notices").delete().eq("id", notice_id).execute()
+    cache_clear("notices")
     return {"status": "ok"}
 
 
@@ -1669,6 +1749,9 @@ def visitor_ping(req: VisitorPing):
 @app.get("/api/visitors/stats")
 def get_visitor_stats():
     """방문자 통계"""
+    cached = cache_get("visitor_stats", 20)   # 접속자수 20초 staleness 허용(잦은 호출 부하 완화)
+    if cached is not None:
+        return cached
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
 
@@ -1687,14 +1770,14 @@ def get_visitor_stats():
     online_list = online.data or []
     online_count = len(online_list)
 
-    return {
+    return cache_set("visitor_stats", {
         "today": today_count,
         "total": total_count,
         "online": online_count,
         "online_list": [
             {"name": r["character_name"]} for r in online_list
         ],
-    }
+    })
 
 
 # ── 매크로 인증 / 다운로드 API ───────────────────────────────
