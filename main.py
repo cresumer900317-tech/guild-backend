@@ -52,21 +52,24 @@ def _nfc(s):
 POP_ACTIVE = 50   # 길드 건강도 '활동' 기준: 인기도 ≥50 멤버를 활동 멤버로 집계
 
 
-def load_server_ranking_rows(limit: int = 7000):
-    """server_ranking 전체 행을 읽어 캐시(10분). server-ranking·guild-health 가 공유."""
+_SR_MAX = 7000   # 캐시는 항상 전체를 담는다(요청 limit 무관) — limit별 캐시 분기 시 truncate 버그 방지
+
+def load_server_ranking_rows(limit: int = _SR_MAX):
+    """server_ranking 전체를 읽어 캐시(10분) 후 limit만큼 slice. server-ranking·guild-health 공유.
+    ⚠️ 캐시 키는 limit 무관(항상 전체 저장) — limit=100 호출이 전체 캐시를 망치지 않도록."""
     cached = cache_get("server_ranking_rows", 600)
-    if cached is not None:
-        return cached
-    out, step, start = [], 1000, 0
-    while start < limit:
-        end = min(start + step, limit) - 1
-        res = supabase.table("server_ranking").select("*").order("server_rank").range(start, end).execute()
-        batch = res.data or []
-        out.extend(batch)
-        if len(batch) < (end - start + 1):
-            break
-        start += step
-    return cache_set("server_ranking_rows", out)
+    if cached is None:
+        out, step, start = [], 1000, 0
+        while start < _SR_MAX:
+            end = min(start + step, _SR_MAX) - 1
+            res = supabase.table("server_ranking").select("*").order("server_rank").range(start, end).execute()
+            batch = res.data or []
+            out.extend(batch)
+            if len(batch) < (end - start + 1):
+                break
+            start += step
+        cached = cache_set("server_ranking_rows", out)
+    return cached[:limit] if limit else cached
 
 
 def create_access_token(character_name: str, role: str) -> str:
