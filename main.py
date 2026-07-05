@@ -43,8 +43,14 @@ def cache_set(key, value):
     return value
 
 def cache_clear(*keys):
+    """키가 '*'로 끝나면 접두사 일치 전체 삭제 (예: 'guild_health_*')."""
     for k in keys:
-        _resp_cache.pop(k, None)
+        if k.endswith("*"):
+            prefix = k[:-1]
+            for ck in [c for c in _resp_cache if c.startswith(prefix)]:
+                _resp_cache.pop(ck, None)
+        else:
+            _resp_cache.pop(k, None)
 
 def _nfc(s):
     return unicodedata.normalize("NFC", str(s or "")).strip()
@@ -337,7 +343,7 @@ def get_members():
 
 
 @app.post("/api/update-pop-rank")
-def update_pop_rank():
+def update_pop_rank(admin: dict = Depends(require_admin)):
     """
     mgf.gg 스카니아11 인기도 랭킹 페이지를 크롤링해서
     members 테이블의 pop_server_rank 컬럼을 업데이트합니다.
@@ -400,7 +406,7 @@ def get_weekly():
 
 
 @app.post("/api/snapshot-pop-backfill")
-def snapshot_pop_backfill():
+def snapshot_pop_backfill(admin: dict = Depends(require_admin)):
     """이번 달 스냅샷에 현재 인기도 데이터 채우기 (일회용)"""
     now = datetime.now()
     snapshot_month = now.strftime("%Y-%m")
@@ -423,7 +429,7 @@ def get_monthly():
     monthly_snapshots에서 이번 달 스냅샷(월초 전투력)을 가져와
     현재 members 테이블과 비교해 성장량을 계산한다.
     """
-    now = datetime.now()
+    now = datetime.now(_KST)  # Railway=UTC라 KST 명시 (월 경계 9시간 어긋남 방지)
     snapshot_month = now.strftime("%Y-%m")
 
     # 현재 멤버 데이터
@@ -523,7 +529,7 @@ def get_home_summary():
     avg_rank = round(sum(active) / len(active), 1) if active else 0
 
     # 이번 달 월간 성장 TOP1
-    now = datetime.now()
+    now = datetime.now(_KST)
     snapshot_month = now.strftime("%Y-%m")
     snap_result = supabase.table("monthly_snapshots")\
         .select("name,power")\
@@ -549,14 +555,14 @@ def get_home_summary():
 
 
 @app.post("/api/crawl")
-def manual_crawl():
+def manual_crawl(admin: dict = Depends(require_admin)):
     from scheduler import run_crawl
     run_crawl()
     return {"status": "ok", "message": "크롤링 완료"}
 
 
 @app.post("/api/snapshot")
-def manual_snapshot():
+def manual_snapshot(admin: dict = Depends(require_admin)):
     """수동으로 이번 달 스냅샷 저장 (테스트용)"""
     from scheduler import run_crawl_and_snapshot
     run_crawl_and_snapshot()
@@ -564,7 +570,7 @@ def manual_snapshot():
 
 
 @app.post("/api/update-boss-rank")
-def update_boss_rank():
+def update_boss_rank(admin: dict = Depends(require_admin)):
     """토벌전/월드보스 점수·서버순위 크롤링 → members 갱신 (수동 트리거)"""
     from scheduler import run_boss_rank_update
     run_boss_rank_update()
@@ -572,7 +578,7 @@ def update_boss_rank():
 
 
 @app.post("/api/update-server-ranking")
-def update_server_ranking():
+def update_server_ranking(admin: dict = Depends(require_admin)):
     """스카니아11 서버 전체 Top3000 크롤 → server_ranking 갱신 (수동 트리거). 테이블 생성 후 호출."""
     from scheduler import run_server_top_update
     run_server_top_update()
@@ -580,7 +586,7 @@ def update_server_ranking():
 
 
 @app.post("/api/update-guild-ranks")
-def update_guild_ranks():
+def update_guild_ranks(admin: dict = Depends(require_admin)):
     """친구 길드들의 서버 길드순위 크롤링 → guild_server_ranks 갱신 (수동 트리거)"""
     from scheduler import run_guild_rank_update
     run_guild_rank_update()
@@ -642,6 +648,33 @@ def get_guild_health(limit: int = 30):
         g = _nfc(m.get("guild"))
         if g:
             by.setdefault(g, []).append(m)
+
+    # 성장축: server_ranking_history에서 ~7일 전(6일 이전 중 최신) 스냅샷을 기준으로
+    # 멤버별 주간 전투력 성장률 계산. 이력 부족/테이블 없음이면 growth 필드는 None(프론트가 축 숨김).
+    old_power, growth_base_date = {}, None
+    try:
+        target = (datetime.now(_KST).date() - timedelta(days=6)).isoformat()
+        base = (supabase.table("server_ranking_history").select("snapshot_date")
+                .lte("snapshot_date", target).order("snapshot_date", desc=True)
+                .limit(1).execute())
+        if base.data:
+            growth_base_date = base.data[0]["snapshot_date"]
+            gnames = [_nfc(g.get("guildName")) for g in guilds if g.get("guildName")]
+            start, step = 0, 1000
+            while True:
+                res = (supabase.table("server_ranking_history").select("name,power")
+                       .eq("snapshot_date", growth_base_date)
+                       .in_("guild", gnames)
+                       .range(start, start + step - 1).execute())
+                batch = res.data or []
+                for r in batch:
+                    old_power[_nfc(r.get("name"))] = int(r.get("power") or 0)
+                if len(batch) < step:
+                    break
+                start += step
+    except Exception as ge:
+        print(f"[guild-health] growth 이력 조회 스킵: {repr(ge)[:120]}")
+
     out = []
     for g in guilds:
         ms = by.get(_nfc(g.get("guildName")), [])
@@ -652,18 +685,31 @@ def get_guild_health(limit: int = 30):
         tot = sum(powers)
         eff = (1.0 / sum((p / tot) ** 2 for p in powers)) if tot else 0
         active_ratio = (sum(1 for p in pops if p >= POP_ACTIVE) / len(pops)) if pops else None
+        # 주간 성장: 두 시점 모두 데이터 있는 멤버 중 +1% 이상 성장한 비율 (0성장=미접속 구분)
+        grow = []
+        for m in ms:
+            p_now = int(m.get("power") or 0)
+            p_old = old_power.get(_nfc(m.get("nickname")))
+            if p_now > 0 and p_old:
+                grow.append(p_now / p_old - 1.0)
+        growth_ratio = (sum(1 for x in grow if x > 0.01) / len(grow)) if grow else None
+        growth_median = sorted(grow)[len(grow) // 2] if grow else None
         out.append({
             **g,
             "memberSampled": n,
             "medianPower": median,
             "effContributors": round(eff, 2),
             "activeRatio": round(active_ratio, 4) if active_ratio is not None else None,
+            "growthRatio": round(growth_ratio, 4) if growth_ratio is not None else None,
+            "growthMedianPct": round(growth_median * 100, 2) if growth_median is not None else None,
+            "growthSampled": len(grow),
+            "growthBaseDate": growth_base_date,
         })
     return cache_set(ckey, out)
 
 
 @app.post("/api/update-server-guild-ranking")
-def update_server_guild_ranking():
+def update_server_guild_ranking(admin: dict = Depends(require_admin)):
     """서버 전체 길드 랭킹 수동 갱신 트리거. 테이블 생성 후 호출."""
     from scheduler import run_server_guild_update
     run_server_guild_update()
@@ -693,7 +739,7 @@ def get_server_boss_ranking(kind: str = "guild_boss", limit: int = 100):
 
 
 @app.post("/api/update-server-boss-ranking")
-def update_server_boss_ranking():
+def update_server_boss_ranking(admin: dict = Depends(require_admin)):
     """서버 전체 보스 랭킹(토벌전·월드보스) 수동 갱신 트리거. 테이블 생성 후 호출."""
     from scheduler import run_server_boss_update
     run_server_boss_update()
@@ -1084,7 +1130,7 @@ def get_rivals():
 
 
 @app.post("/api/rivals/crawl")
-def manual_rival_crawl():
+def manual_rival_crawl(admin: dict = Depends(require_admin)):
     """경쟁 길드 수동 크롤링 (테스트용)"""
     from scheduler import run_rival_crawl
     run_rival_crawl()
@@ -1092,7 +1138,7 @@ def manual_rival_crawl():
 
 
 @app.post("/api/rivals/snapshot")
-def manual_rival_snapshot():
+def manual_rival_snapshot(admin: dict = Depends(require_admin)):
     """경쟁 길드 수동 스냅샷 저장 (테스트용)"""
     from scheduler import save_rival_snapshot
     save_rival_snapshot()
@@ -1136,7 +1182,7 @@ def get_contributions(month: str = None):
 
 
 @app.post("/api/contributions")
-def upsert_contribution(req: ContributionUpsert):
+def upsert_contribution(req: ContributionUpsert, admin: dict = Depends(require_admin)):
     """공헌도 입력/수정 (upsert)"""
     supabase.table("guild_contributions").upsert({
         "month": req.month,
@@ -1507,12 +1553,15 @@ def realtime_token(user: dict = Depends(get_current_user)):
 # ── 공지사항 API ──────────────────────────────────────────────
 
 @app.get("/api/notices")
-def get_notices():
-    cached = cache_get("notices", 60)
+def get_notices(summary: bool = False):
+    # summary=true 면 본문(content) 제외 — 목록 화면용 (tips/free와 동일 패턴)
+    ckey = "notices_summary" if summary else "notices"
+    cached = cache_get(ckey, 60)
     if cached is not None:
         return cached
-    result = supabase.table("notices")        .select("*")        .order("is_pinned", desc=True)        .order("created_at", desc=True)        .execute()
-    return cache_set("notices", result.data or [])
+    cols = "id,title,author,author_guild,category,is_pinned,created_at" if summary else "*"
+    result = supabase.table("notices")        .select(cols)        .order("is_pinned", desc=True)        .order("created_at", desc=True)        .execute()
+    return cache_set(ckey, result.data or [])
 
 @app.post("/api/notices")
 def create_notice(req: NoticeCreate, admin: dict = Depends(require_admin)):
@@ -1524,13 +1573,13 @@ def create_notice(req: NoticeCreate, admin: dict = Depends(require_admin)):
         "title": title, "content": content, "category": req.category,
         "author": req.author, "author_guild": req.author_guild, "is_pinned": req.is_pinned,
     }).execute()
-    cache_clear("notices")
+    cache_clear("notices*")
     return result.data[0] if result.data else {}
 
 @app.delete("/api/notices/{notice_id}")
 def delete_notice(notice_id: int, admin: dict = Depends(require_admin)):
     supabase.table("notices").delete().eq("id", notice_id).execute()
-    cache_clear("notices")
+    cache_clear("notices*")
     return {"status": "ok"}
 
 
@@ -1547,18 +1596,17 @@ def get_tips(category: str = None, summary: bool = False):
     return result.data or []
 
 @app.post("/api/tips")
-def create_tip(req: TipCreate):
+def create_tip(req: TipCreate, user: dict = Depends(get_current_user)):
     title = req.title.strip()
     content = req.content.strip()
     if not title or not content:
         raise HTTPException(status_code=400, detail="제목과 내용을 입력해주세요")
-    if not req.author:
-        raise HTTPException(status_code=400, detail="로그인이 필요합니다")
+    author = user["character_name"]  # 작성자는 토큰 기준 (body author 위조 방지)
     result = supabase.table("tips").insert({
         "title": title, "content": content, "category": req.category,
-        "author": req.author, "author_guild": req.author_guild, "likes": 0, "views": 0,
+        "author": author, "author_guild": req.author_guild, "likes": 0, "views": 0,
     }).execute()
-    award_board_points(req.author, "tip", req.author_guild)
+    award_board_points(author, "tip", req.author_guild)
     return result.data[0] if result.data else {}
 
 @app.get("/api/tips/{tip_id}")
@@ -1678,15 +1726,13 @@ def view_free_post(post_id: int):
     return {"views": current + 1}
 
 @app.post("/api/free")
-def create_free_post(payload: dict):
+def create_free_post(payload: dict, user: dict = Depends(get_current_user)):
     title = (payload.get("title") or "").strip()
     content = (payload.get("content") or "").strip()
-    author = payload.get("author", "")
+    author = user["character_name"]  # 작성자는 토큰 기준 (body author 위조 방지)
     author_guild = payload.get("author_guild", "")
     if not title or not content:
         raise HTTPException(status_code=400, detail="제목과 내용을 입력해주세요")
-    if not author:
-        raise HTTPException(status_code=400, detail="로그인이 필요합니다")
     result = supabase.table("free_posts").insert({
         "title": title, "content": content,
         "author": author, "author_guild": author_guild,

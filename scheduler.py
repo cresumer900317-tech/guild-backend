@@ -5,10 +5,23 @@ from database import supabase
 from fetch_mgf import fetch_mgf_data
 from transform import transform_data
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+KST = ZoneInfo("Asia/Seoul")  # Railway 컨테이너는 UTC — 날짜 경계 계산은 KST 명시
+
+
+def _invalidate_cache(*keys):
+    """크롤 성공 후 main의 응답 캐시 무효화 (TTL 만료 전 최신 데이터 노출).
+    지연 import로 순환참조 회피. main 미로드(단독 실행) 시 무시."""
+    try:
+        from main import cache_clear
+        cache_clear(*keys)
+    except Exception:
+        pass
 
 
 def rerank_by_guild(members):
@@ -60,7 +73,7 @@ def save_monthly_snapshot(members: list[dict]):
     snapshot_month = "YYYY-MM" (이번 달)
     이미 해당 월 스냅샷이 있으면 저장하지 않음 (월 1회만).
     """
-    now = datetime.now()
+    now = datetime.now(KST)
     snapshot_month = now.strftime("%Y-%m")
 
     # 이미 이번 달 스냅샷이 있는지 확인
@@ -125,6 +138,7 @@ def run_crawl():
             supabase.table("members").insert(members).execute()
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
+        _invalidate_cache("home_summary")
         return members
 
     except Exception as e:
@@ -135,7 +149,7 @@ def run_crawl():
 def save_rival_snapshot():
     """경쟁 길드 월간 스냅샷 저장 (매달 1일 실행)"""
     from datetime import datetime
-    month = datetime.now().strftime("%Y-%m")
+    month = datetime.now(KST).strftime("%Y-%m")
     logger.info(f"=== [경쟁 길드] 월간 스냅샷 저장: {month} ===")
     try:
         rival_names = ["싸이월드", "리안"]
@@ -296,6 +310,7 @@ def run_server_guild_update():
             _time.sleep(0.4)
         supabase.table("server_guild_ranking").delete().neq("guild_rank", 0).execute()
         supabase.table("server_guild_ranking").insert(rows).execute()
+        _invalidate_cache("guild_health_*")
         logger.info(f"=== [서버 길드] 완료: {len(rows)}개 저장(균형 포함) ===")
     except Exception as e:
         logger.error(f"[서버 길드] 오류: {e}")
@@ -352,11 +367,12 @@ def run_server_top_update():
         CHUNK = 500
         for i in range(0, len(rows), CHUNK):
             supabase.table("server_ranking").insert(rows[i:i + CHUNK]).execute()
+        _invalidate_cache("server_ranking_rows", "home_summary", "guild_health_*")
         logger.info(f"=== [서버 전체] 완료: {len(rows)}명 저장 ===")
 
         # 일별 이력 적립(프로필 성장 그래프용). 테이블(server_ranking_history) 없으면 조용히 스킵.
         try:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now(KST).strftime("%Y-%m-%d")
             hist = [{
                 "snapshot_date": today,
                 "name": r.get("nickname"),
@@ -412,16 +428,16 @@ def start_scheduler():
         next_run_time=datetime.now(),
     )
 
-    # 매달 1일 00:05에 크롤링 + 월간 스냅샷 저장
+    # 매달 1일 00:05 KST에 크롤링 + 월간 스냅샷 저장 (컨테이너=UTC라 timezone 명시)
     scheduler.add_job(
         run_crawl_and_snapshot,
-        CronTrigger(day=1, hour=0, minute=5)
+        CronTrigger(day=1, hour=0, minute=5, timezone="Asia/Seoul")
     )
 
-    # 매달 1일 00:10 경쟁 길드 스냅샷
+    # 매달 1일 00:10 KST 경쟁 길드 스냅샷
     scheduler.add_job(
         save_rival_snapshot,
-        CronTrigger(day=1, hour=0, minute=10)
+        CronTrigger(day=1, hour=0, minute=10, timezone="Asia/Seoul")
     )
 
     # 매일 08:00 KST 개인 업무 디지스트 이메일
