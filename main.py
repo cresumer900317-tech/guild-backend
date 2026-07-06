@@ -157,7 +157,30 @@ def _toggle_like(board: str, table: str, post_id: int, user: Optional[dict]) -> 
            .eq("board", board).eq("post_id", post_id).execute())
     new = cnt.count or 0
     supabase.table(table).update({"likes": new}).eq("id", post_id).execute()
+    if liked:
+        _notify_post_liked(table, board, post_id, name)
     return {"likes": new, "liked": liked}
+
+
+def _notify_post_liked(table: str, btype: str, post_id: int, liker: str):
+    """좋아요 시 글쓴이에게 푸시(본인 좋아요·취소는 제외, 실패해도 토글은 성공시킨다)."""
+    try:
+        post = supabase.table(table).select("author,title").eq("id", post_id).execute()
+        if not post.data:
+            return
+        author = post.data[0].get("author")
+        title = post.data[0].get("title") or "내 글"
+        if not author or author == liker:
+            return
+        rows = (supabase.table("push_tokens").select("token")
+                .eq("character_name", author).execute().data) or []
+        tokens = [r["token"] for r in rows]
+        if tokens:
+            _send(tokens, "\u2764\ufe0f \uc88b\uc544\uc694",
+                  f'{liker}\ub2d8\uc774 "{title[:30]}" \uae00\uc744 \uc88b\uc544\ud574\uc694!',
+                  {"type": btype, "id": post_id})
+    except Exception as e:
+        print(f"[\uc88b\uc544\uc694\uc54c\ub9bc] \ud478\uc2dc \uc2e4\ud328: {e}")
 
 
 # ── Pydantic 요청 모델 ────────────────────────────────────────
@@ -212,12 +235,6 @@ class TipCommentCreate(BaseModel):
 
 class TipCommentUpdate(BaseModel):
     content: str
-
-class ContributionUpsert(BaseModel):
-    month: str
-    guild_name: str
-    member_name: str
-    contribution: int = 0
 
 class VisitorPing(BaseModel):
     session_id: str
@@ -997,208 +1014,6 @@ def del_rival_pick(rival_name: str, user: dict = Depends(get_current_user)):
     return {"status": "ok"}
 
 
-@app.get("/api/rivals")
-def get_rivals():
-    """
-    경쟁 길드 + 친구들(메인 길드) 비교 데이터
-    멤버 리스트 포함
-    """
-    now = datetime.now()
-
-    # ── 친구들 멤버 (members 테이블에서 친구들만) ──
-    friends_data = fetch_members_raw(filters="&guild=eq.친구들")
-    friends_members = sorted(
-        friends_data or [],
-        key=lambda m: m.get("power") or 0,
-        reverse=True
-    )
-
-    friends_total = sum(m.get("power") or 0 for m in friends_members)
-    friends_count = len(friends_members)
-    friends_avg_level = round(
-        sum(m.get("level") or 0 for m in friends_members) / friends_count, 1
-    ) if friends_count else 0
-    friends_top1 = friends_members[0] if friends_members else {}
-
-    # 월간 성장량 계산
-    snapshot_month = now.strftime("%Y-%m")
-    snap_result = supabase.table("monthly_snapshots")        .select("name,power")        .eq("snapshot_month", snapshot_month)        .execute()
-    snap_map = {s["name"]: s["power"] or 0 for s in (snap_result.data or [])}
-    friends_monthly_growth = sum(
-        (m.get("power") or 0) - snap_map.get(m["name"], m.get("power") or 0)
-        for m in friends_members
-        if m["name"] in snap_map
-    )
-
-    # 친구들 공헌도 합산
-    contrib_month = now.strftime("%Y-%m")
-    contrib_result = supabase.table("guild_contributions")        .select("contribution")        .eq("month", contrib_month)        .eq("guild_name", "친구들")        .execute()
-    friends_contribution = sum(r.get("contribution", 0) for r in (contrib_result.data or []))
-
-    # 친구들 인기도 합산
-    friends_popularity = sum(m.get("popularity") or 0 for m in friends_members)
-
-    # 친구들 성장률
-    friends_growth_rate = None
-    if friends_monthly_growth and friends_total:
-        base = friends_total - friends_monthly_growth
-        if base > 0:
-            friends_growth_rate = round(friends_monthly_growth / base * 100, 2)
-
-    friends_guild = {
-        "guild_name": "친구들",
-        "captured_at": now.isoformat(),
-        "total_power": friends_total,
-        "member_count": friends_count,
-        "avg_level": friends_avg_level,
-        "monthly_growth": friends_monthly_growth,
-        "growth_rate": friends_growth_rate,
-        "total_popularity": friends_popularity,
-        "total_contribution": friends_contribution,
-        "top1_name": friends_top1.get("name", ""),
-        "top1_power": friends_top1.get("power", 0),
-        "top1_job": friends_top1.get("job", ""),
-        "members": [
-            {
-                "name": m.get("name"),
-                "job": m.get("job"),
-                "level": m.get("level"),
-                "power": m.get("power"),
-                "power_text": m.get("power_text"),
-                "guild_rank": m.get("guild_rank"),
-                "detail_url": m.get("detail_url"),
-            }
-            for m in friends_members
-        ],
-    }
-
-    # ── 경쟁 길드 (rival_guilds + rival_members + rival_snapshots) ──
-    rival_names = ["싸이월드", "리안"]
-    rivals = []
-    snap_month = now.strftime("%Y-%m")
-
-    for name in rival_names:
-        summary_result = supabase.table("rival_guilds")            .select("*")            .eq("guild_name", name)            .order("captured_at", desc=True)            .limit(1)            .execute()
-        if not summary_result.data:
-            continue
-        summary = summary_result.data[0]
-
-        members_result = supabase.table("rival_members")            .select("*")            .eq("guild_name", name)            .order("guild_rank")            .execute()
-        rival_members = members_result.data or []
-
-        avg_level = round(
-            sum(m.get("level") or 0 for m in rival_members) / len(rival_members), 1
-        ) if rival_members else 0
-
-        total_popularity = sum(m.get("popularity") or 0 for m in rival_members)
-
-        # 월간 성장량 계산 (스냅샷과 현재 비교)
-        monthly_growth = None
-        growth_rate = None
-        snap_result = supabase.table("rival_snapshots")            .select("total_power")            .eq("snapshot_month", snap_month)            .eq("guild_name", name)            .limit(1)            .execute()
-        if snap_result.data:
-            snap_power = snap_result.data[0]["total_power"] or 0
-            current_power = summary.get("total_power") or 0
-            if snap_power > 0 and current_power > 0:
-                monthly_growth = current_power - snap_power
-                growth_rate = round(monthly_growth / snap_power * 100, 2)
-
-        rivals.append({
-            **summary,
-            "avg_level": avg_level,
-            "monthly_growth": monthly_growth,
-            "growth_rate": growth_rate,
-            "total_popularity": total_popularity,
-            "total_contribution": None,
-            "members": [
-                {
-                    "name": m.get("name"),
-                    "job": m.get("job"),
-                    "level": m.get("level"),
-                    "power": m.get("power"),
-                    "power_text": m.get("power_text"),
-                    "guild_rank": m.get("guild_rank"),
-                    "detail_url": None,
-                }
-                for m in rival_members
-            ],
-        })
-
-    all_guilds = [friends_guild] + rivals
-    all_guilds.sort(key=lambda x: x.get("total_power") or 0, reverse=True)
-    return all_guilds
-
-
-@app.post("/api/rivals/crawl")
-def manual_rival_crawl(admin: dict = Depends(require_admin)):
-    """경쟁 길드 수동 크롤링 (테스트용)"""
-    from scheduler import run_rival_crawl
-    run_rival_crawl()
-    return {"status": "ok", "message": "경쟁 길드 크롤링 완료"}
-
-
-@app.post("/api/rivals/snapshot")
-def manual_rival_snapshot(admin: dict = Depends(require_admin)):
-    """경쟁 길드 수동 스냅샷 저장 (테스트용)"""
-    from scheduler import save_rival_snapshot
-    save_rival_snapshot()
-    return {"status": "ok", "message": "경쟁 길드 스냅샷 저장 완료"}
-
-
-# ── 공헌도 API ──────────────────────────────────────────────
-
-@app.get("/api/contributions")
-def get_contributions(month: str = None):
-    """월별 길드 공헌도 조회"""
-    if not month:
-        from datetime import datetime
-        month = datetime.now().strftime("%Y-%m")
-    result = supabase.table("guild_contributions")        .select("*")        .eq("month", month)        .order("contribution", desc=True)        .execute()
-    rows = result.data or []
-
-    # 길드별 합산
-    from collections import defaultdict
-    guild_totals = defaultdict(int)
-    guild_members = defaultdict(list)
-    for row in rows:
-        guild_totals[row["guild_name"]] += row["contribution"]
-        guild_members[row["guild_name"]].append({
-            "name": row["member_name"],
-            "contribution": row["contribution"],
-        })
-
-    return {
-        "month": month,
-        "guilds": [
-            {
-                "guild_name": g,
-                "total": guild_totals[g],
-                "members": guild_members[g],
-            }
-            for g in guild_totals
-        ],
-        "rows": rows,
-    }
-
-
-@app.post("/api/contributions")
-def upsert_contribution(req: ContributionUpsert, admin: dict = Depends(require_admin)):
-    """공헌도 입력/수정 (upsert)"""
-    supabase.table("guild_contributions").upsert({
-        "month": req.month,
-        "guild_name": req.guild_name,
-        "member_name": req.member_name,
-        "contribution": req.contribution,
-    }, on_conflict="month,guild_name,member_name").execute()
-
-    return {"status": "ok", "message": f"{req.member_name} 공헌도 저장 완료"}
-
-
-@app.delete("/api/contributions")
-def delete_contribution(month: str, guild_name: str, member_name: str, admin: dict = Depends(require_admin)):
-    """공헌도 삭제 (관리자)"""
-    supabase.table("guild_contributions")        .delete()        .eq("month", month)        .eq("guild_name", guild_name)        .eq("member_name", member_name)        .execute()
-    return {"status": "ok"}
 
 
 # ── 회원 API ──────────────────────────────────────────────────

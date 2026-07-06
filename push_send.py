@@ -71,6 +71,23 @@ def _send(tokens: list[str], title: str, body: str, data: dict):
                 logger.error(f"[일정푸시] Expo 발송 실패: {e}")
 
 
+def notify_admins(title: str, body: str, data: dict | None = None):
+    """운영진(admin/superadmin) 푸시 토큰에만 발송. 실패해도 호출측 흐름은 깨지 않는다."""
+    try:
+        admins = (supabase.table("users").select("character_name")
+                  .in_("role", ["admin", "superadmin"]).execute().data) or []
+        names = [a["character_name"] for a in admins]
+        if not names:
+            return
+        rows = (supabase.table("push_tokens").select("token")
+                .in_("character_name", names).execute().data) or []
+        tokens = [r["token"] for r in rows]
+        if tokens:
+            _send(tokens, title, body, data or {})
+    except Exception as e:
+        logger.error(f"[운영진알림] 발송 실패: {e}")
+
+
 def run_schedule_push():
     """스케줄러가 5분마다 호출. 발송 시점이 된 일정 알림을 1회씩 발송."""
     try:

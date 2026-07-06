@@ -52,17 +52,20 @@ def save_debug_html(guild_name: str, html: str) -> None:
     filename = Path(__file__).resolve().parent / f"debug_guild_{safe_filename(guild_name)}.html"
     filename.write_text(html, encoding="utf-8")
 
-def fetch_page(url: str, retries: int = 1, proxies=None) -> str:
+def fetch_page(url: str, retries: int = 2, proxies=None) -> str:
     last_error = None
-    for _ in range(retries + 1):
+    for attempt in range(retries + 1):
         try:
             res = _session.get(url, timeout=REQUEST_TIMEOUT, proxies=proxies)
+            if res.status_code == 429:  # rate-limit은 명시적으로 길게 쉬고 재시도
+                time.sleep(5 * (attempt + 1))
+                res.raise_for_status()
             res.raise_for_status()
             res.encoding = "utf-8"
             return res.text
         except Exception as exc:
             last_error = exc
-            time.sleep(0.5)
+            time.sleep(1.0 * (attempt + 1))   # 1s -> 2s -> 3s 점증 백오프
     raise last_error
 
 def convert_korean_power_to_int(text: str) -> int:

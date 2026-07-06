@@ -24,6 +24,28 @@ def _invalidate_cache(*keys):
         pass
 
 
+# 크롤 잡별 연속 실패 카운터 — 임계 도달 시 운영진 푸시 1회(성공하면 리셋).
+# 지금까지는 로그로만 남아 실패가 조용히 묻혔다(토벌전 계속 null이던 류).
+_fail_counts = {}
+_FAIL_ALERT_AT = {"크롤링": 3, "서버 전체": 4}   # 1h 간격 3회 / 12h 간격 4회(=2일)
+
+
+def _track_job(job: str, ok: bool, detail: str = ""):
+    if ok:
+        _fail_counts.pop(job, None)
+        return
+    n = _fail_counts.get(job, 0) + 1
+    _fail_counts[job] = n
+    threshold = _FAIL_ALERT_AT.get(job, 3)
+    if n == threshold:   # 임계 도달 순간에만 1회 발송(스팸 방지)
+        try:
+            from push_send import notify_admins
+            notify_admins(f"⚠️ [{job}] 크롤 연속 {n}회 실패",
+                          (detail or "데이터 갱신이 멈췄을 수 있어요.")[:120] + " Railway 로그를 확인해주세요.")
+        except Exception as e:
+            logger.error(f"[{job}] 실패 알림 발송 불가: {e}")
+
+
 def rerank_by_guild(members):
     """길드별로 전투력 순 재정렬 후 guildRank 1부터 재부여"""
     from collections import defaultdict
@@ -128,63 +150,29 @@ def run_crawl():
         existing = supabase.table("members").select("name," + ",".join(KEEP_COLS)).execute()
         keep_map = {m["name"]: {c: m.get(c) for c in KEEP_COLS} for m in (existing.data or [])}
 
-        # 기존 데이터 삭제 후 새로 저장
-        supabase.table("members").delete().neq("id", 0).execute()
+        # 새 데이터 insert 후 이전 행 삭제 — delete→insert 사이 API가 0명으로 응답하던 빈 창 제거.
+        # (id는 증가 시퀀스라 새 행의 최소 id 미만 = 이전 크롤 행)
         if members:
             for m in members:
                 saved = keep_map.get(m.get("name")) or {}
                 for c in KEEP_COLS:  # 모든 행에 동일 키 보장(이전 값 복원 or None)
                     m[c] = saved.get(c)
-            supabase.table("members").insert(members).execute()
+            res = supabase.table("members").insert(members).execute()
+            new_ids = [r["id"] for r in (res.data or []) if r.get("id") is not None]
+            if new_ids:
+                supabase.table("members").delete().lt("id", min(new_ids)).execute()
+            else:  # 반환 행에 id가 없으면(비정상) 기존 방식 폴백은 위험 — 로그만
+                logger.warning("[크롤링] insert 반환에 id 없음 — 이전 행 정리 건너뜀")
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
         _invalidate_cache("home_summary")
+        _track_job("크롤링", ok=bool(members), detail="mgf.gg 멤버 크롤 결과가 비어있어요.")
         return members
 
     except Exception as e:
         logger.error(f"크롤링 오류: {e}")
+        _track_job("크롤링", ok=False, detail=repr(e)[:100])
         return []
-
-
-def save_rival_snapshot():
-    """경쟁 길드 월간 스냅샷 저장 (매달 1일 실행)"""
-    from datetime import datetime
-    month = datetime.now(KST).strftime("%Y-%m")
-    logger.info(f"=== [경쟁 길드] 월간 스냅샷 저장: {month} ===")
-    try:
-        rival_names = ["싸이월드", "리안"]
-        for name in rival_names:
-            result = supabase.table("rival_guilds")                .select("total_power,member_count")                .eq("guild_name", name)                .order("captured_at", desc=True)                .limit(1)                .execute()
-            if not result.data:
-                continue
-            latest = result.data[0]
-            supabase.table("rival_snapshots").upsert({
-                "snapshot_month": month,
-                "guild_name": name,
-                "total_power": latest["total_power"],
-                "member_count": latest["member_count"],
-            }, on_conflict="snapshot_month,guild_name").execute()
-            logger.info(f"  [{name}] 스냅샷 저장: {latest['total_power']}")
-    except Exception as e:
-        logger.error(f"경쟁 길드 스냅샷 오류: {e}")
-
-
-def run_rival_crawl():
-    """경쟁 길드 데이터 수집 및 저장"""
-    logger.info("=== [경쟁 길드] 크롤링 시작 ===")
-    try:
-        from fetch_mgf import fetch_rival_guilds
-        summaries, members = fetch_rival_guilds()
-        if summaries:
-            supabase.table("rival_guilds").insert(summaries).execute()
-            logger.info(f"[경쟁 길드] 요약 {len(summaries)}개 저장")
-        if members:
-            for guild_name in set(m["guild_name"] for m in members):
-                supabase.table("rival_members")                    .delete()                    .eq("guild_name", guild_name)                    .execute()
-            supabase.table("rival_members").insert(members).execute()
-            logger.info(f"[경쟁 길드] 멤버 {len(members)}명 저장")
-    except Exception as e:
-        logger.error(f"경쟁 길드 크롤링 오류: {e}")
 
 
 def run_crawl_and_snapshot():
@@ -349,6 +337,7 @@ def run_server_top_update():
         # 크롤 실패(부분 수집) 시 기존 데이터 보존 — 빈/반쪽 교체 방지
         if len(rows) < 100:
             logger.info(f"[서버 전체] 수집 {len(rows)}명뿐 → 교체 건너뜀(기존 유지)")
+            _track_job("서버 전체", ok=False, detail=f"수집 {len(rows)}명뿐(차단 의심). 이력도 안 쌓이는 중.")
             return
         # 데이터센터 IP(Railway)는 mgf rate-limit으로 ~960에서 끊김. 이미 더 큰 데이터가
         # 있으면(거주지 IP 풀크롤로 채운 경우) 부분수집으로 깎지 않는다.
@@ -358,6 +347,7 @@ def run_server_top_update():
             existing_count = 0
         if existing_count >= 1000 and len(rows) < existing_count * 0.8:
             logger.info(f"[서버 전체] 수집 {len(rows)}명 < 기존 {existing_count}×0.8 → 차단 의심, 교체 건너뜀(기존 유지)")
+            _track_job("서버 전체", ok=False, detail=f"수집 {len(rows)}/{existing_count}명(차단 의심). 이력도 안 쌓이는 중.")
             return
         now = datetime.now().isoformat()
         for r in rows:
@@ -388,8 +378,10 @@ def run_server_top_update():
             logger.info(f"[서버 이력] {today} {len(hist)}명 적립")
         except Exception as he:
             logger.warning(f"[서버 이력] 적립 스킵(테이블 미생성?): {repr(he)[:120]}")
+        _track_job("서버 전체", ok=True)
     except Exception as e:
         logger.error(f"[서버 전체] 오류: {e}")
+        _track_job("서버 전체", ok=False, detail=repr(e)[:100])
 
 
 def start_scheduler():
@@ -403,9 +395,6 @@ def start_scheduler():
 
     # 1시간마다 일반 크롤링 (전투력/멤버) — 시작 시 즉시 1회
     scheduler.add_job(run_crawl, IntervalTrigger(hours=1), next_run_time=now)
-
-    # 1시간마다 경쟁 길드 크롤링
-    scheduler.add_job(run_rival_crawl, IntervalTrigger(hours=1))
 
     # 1시간마다 인기도 서버 순위 업데이트 — 시작 시 즉시 1회
     scheduler.add_job(run_pop_rank_update, IntervalTrigger(hours=1), next_run_time=now)
@@ -432,12 +421,6 @@ def start_scheduler():
     scheduler.add_job(
         run_crawl_and_snapshot,
         CronTrigger(day=1, hour=0, minute=5, timezone="Asia/Seoul")
-    )
-
-    # 매달 1일 00:10 KST 경쟁 길드 스냅샷
-    scheduler.add_job(
-        save_rival_snapshot,
-        CronTrigger(day=1, hour=0, minute=10, timezone="Asia/Seoul")
     )
 
     # 매일 08:00 KST 개인 업무 디지스트 이메일
