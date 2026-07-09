@@ -2366,6 +2366,15 @@ def delete_personal_snippet(snippet_id: int, user: dict = Depends(get_current_us
     return {"status": "ok"}
 
 
+@app.delete("/api/me/snippets")
+def clear_personal_snippets(user: dict = Depends(get_current_user)):
+    """전달함 전체 비우기 — 내 스니펫 일괄 삭제."""
+    count = supabase.table("personal_snippets") \
+        .select("id", count="exact").eq("owner", user["character_name"]).execute().count or 0
+    supabase.table("personal_snippets").delete().eq("owner", user["character_name"]).execute()
+    return {"status": "ok", "deleted": count}
+
+
 # ── Inbox (즉흥 메모) ─────────────────────────────────────────
 
 class PersonalInboxCreate(BaseModel):
