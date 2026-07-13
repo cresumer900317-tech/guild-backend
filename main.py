@@ -2375,6 +2375,108 @@ def clear_personal_snippets(user: dict = Depends(get_current_user)):
     return {"status": "ok", "deleted": count}
 
 
+# ── ICP 코드 브릿지 — jisoar.com/icp (접속코드 인증, 공용 작업공간) ──────────
+# 길드 계정과 완전 분리: /api/icp/login 이 발급하는 토큰은 role="icp", sub="icp:<이름>"
+# 이라 길드 유저를 사칭할 수 없고, 길드 토큰(role=member)은 ICP 엔드포인트에 못 들어옴.
+# 운영: Railway 환경변수 ICP_ACCESS_CODE 에 접속코드 설정 (미설정 시 로그인 차단).
+# 테이블: icp_snippets (personal_snippets와 동일 칼럼 + owner 대신 author, 전원 공유)
+ICP_ACCESS_CODE = os.environ.get("ICP_ACCESS_CODE", "").strip()
+
+
+class IcpLoginRequest(BaseModel):
+    code: str
+    name: str
+
+
+def get_icp_user(authorization: str = Header(None)) -> dict:
+    user = get_current_user(authorization)
+    if user.get("role") != "icp":
+        raise HTTPException(status_code=403, detail="ICP 접근 권한이 없습니다")
+    raw = user["character_name"]
+    return {"name": raw[4:] if raw.startswith("icp:") else raw, "role": "icp"}
+
+
+@app.post("/api/icp/login")
+def icp_login(req: IcpLoginRequest):
+    if not ICP_ACCESS_CODE:
+        raise HTTPException(status_code=503, detail="접속코드가 아직 설정되지 않았어요 (관리자에게 문의)")
+    name = (req.name or "").strip()
+    if not name or len(name) > 30:
+        raise HTTPException(status_code=400, detail="이름을 1~30자로 입력해주세요")
+    if not _secrets.compare_digest((req.code or "").strip(), ICP_ACCESS_CODE):
+        raise HTTPException(status_code=401, detail="접속코드가 올바르지 않아요")
+    return {"token": create_access_token(f"icp:{name}", role="icp"), "name": name}
+
+
+@app.get("/api/icp/snippets")
+def list_icp_snippets(user: dict = Depends(get_icp_user)):
+    result = supabase.table("icp_snippets").select("*") \
+        .order("sort_order").order("updated_at", desc=True).execute()
+    return result.data or []
+
+
+@app.post("/api/icp/snippets")
+def create_icp_snippet(req: PersonalSnippetCreate, user: dict = Depends(get_icp_user)):
+    kind = req.kind or "single"
+    if kind not in ALLOWED_SNIPPET_KIND:
+        raise HTTPException(status_code=400, detail="잘못된 종류입니다")
+    title = (req.title or "").strip()
+    if len(title) > 200:
+        raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
+    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    row = {
+        "author": user["name"],
+        "title": title,
+        "kind": kind,
+        "content": req.content or "",
+        "html": req.html or "",
+        "css": req.css or "",
+        "js": req.js or "",
+        "settings": req.settings or "",
+        "sort_order": req.sort_order or 0,
+    }
+    result = supabase.table("icp_snippets").insert(row).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.patch("/api/icp/snippets/{snippet_id}")
+def update_icp_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: dict = Depends(get_icp_user)):
+    existing = supabase.table("icp_snippets").select("*").eq("id", snippet_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
+    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    updates: dict = {}
+    if req.title is not None:
+        t = req.title.strip()
+        if len(t) > 200:
+            raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
+        updates["title"] = t
+    if req.kind is not None:
+        if req.kind not in ALLOWED_SNIPPET_KIND:
+            raise HTTPException(status_code=400, detail="잘못된 종류입니다")
+        updates["kind"] = req.kind
+    for field in ("content", "html", "css", "js", "settings"):
+        val = getattr(req, field)
+        if val is not None:
+            updates[field] = val
+    if req.sort_order is not None:
+        updates["sort_order"] = req.sort_order
+    if not updates:
+        return existing.data[0]
+    updates["updated_at"] = datetime.now().isoformat()
+    result = supabase.table("icp_snippets").update(updates).eq("id", snippet_id).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.delete("/api/icp/snippets/{snippet_id}")
+def delete_icp_snippet(snippet_id: int, user: dict = Depends(get_icp_user)):
+    existing = supabase.table("icp_snippets").select("id").eq("id", snippet_id).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
+    supabase.table("icp_snippets").delete().eq("id", snippet_id).execute()
+    return {"status": "ok"}
+
+
 # ── Inbox (즉흥 메모) ─────────────────────────────────────────
 
 class PersonalInboxCreate(BaseModel):
