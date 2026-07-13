@@ -2381,6 +2381,8 @@ def clear_personal_snippets(user: dict = Depends(get_current_user)):
 # 운영: Railway 환경변수 ICP_ACCESS_CODE 에 접속코드 설정 (미설정 시 로그인 차단).
 # 테이블: icp_snippets (personal_snippets와 동일 칼럼 + owner 대신 author, 전원 공유)
 ICP_ACCESS_CODE = os.environ.get("ICP_ACCESS_CODE", "").strip()
+# 고정 사용자 — 탭/작성자 무결성 보장. 인원 추가는 Railway 환경변수 ICP_MEMBERS="Jett,Minhyun,새이름"
+ICP_MEMBERS = {m.strip() for m in os.environ.get("ICP_MEMBERS", "Jett,Minhyun").split(",") if m.strip()}
 
 
 class IcpLoginRequest(BaseModel):
@@ -2401,8 +2403,8 @@ def icp_login(req: IcpLoginRequest):
     if not ICP_ACCESS_CODE:
         raise HTTPException(status_code=503, detail="접속코드가 아직 설정되지 않았어요 (관리자에게 문의)")
     name = (req.name or "").strip()
-    if not name or len(name) > 30:
-        raise HTTPException(status_code=400, detail="이름을 1~30자로 입력해주세요")
+    if name not in ICP_MEMBERS:
+        raise HTTPException(status_code=400, detail="등록된 사용자가 아니에요 (Jett / Minhyun)")
     if not _secrets.compare_digest((req.code or "").strip(), ICP_ACCESS_CODE):
         raise HTTPException(status_code=401, detail="접속코드가 올바르지 않아요")
     return {"token": create_access_token(f"icp:{name}", role="icp"), "name": name}
