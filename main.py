@@ -2264,6 +2264,7 @@ def delete_personal_project(project_id: int, user: dict = Depends(get_current_us
 
 ALLOWED_SNIPPET_KIND = {"single", "tb4", "note"}  # note = 코드 아닌 텍스트 메모 (본문은 content 재사용)
 SNIPPET_MAX = 200000  # 코드 한 칸 최대 길이 (≈200KB)
+NOTE_MAX = 2000000    # 메모(note)는 태그매핑 표 등 큰 자료 대비 넉넉하게 (≈2MB)
 
 
 class PersonalSnippetCreate(BaseModel):
@@ -2288,10 +2289,12 @@ class PersonalSnippetUpdate(BaseModel):
     sort_order: Optional[int] = None
 
 
-def _validate_snippet_len(*parts: Optional[str]):
+def _validate_snippet_len(*parts: Optional[str], kind: str = "single"):
+    limit = NOTE_MAX if kind == "note" else SNIPPET_MAX
+    msg = "메모가 너무 깁니다 (2MB 이내)" if kind == "note" else "코드가 너무 깁니다 (한 칸 200KB 이내)"
     for p in parts:
-        if p and len(p) > SNIPPET_MAX:
-            raise HTTPException(status_code=400, detail="코드가 너무 깁니다 (한 칸 200KB 이내)")
+        if p and len(p) > limit:
+            raise HTTPException(status_code=400, detail=msg)
 
 
 @app.get("/api/me/snippets")
@@ -2425,7 +2428,7 @@ def create_icp_snippet(req: PersonalSnippetCreate, user: dict = Depends(get_icp_
     title = (req.title or "").strip()
     if len(title) > 200:
         raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
-    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings, kind=kind)
     row = {
         "author": user["name"],
         "title": title,
@@ -2446,7 +2449,8 @@ def update_icp_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: dict =
     existing = supabase.table("icp_snippets").select("*").eq("id", snippet_id).execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
-    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    effective_kind = req.kind or existing.data[0].get("kind") or "single"
+    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings, kind=effective_kind)
     updates: dict = {}
     if req.title is not None:
         t = req.title.strip()
