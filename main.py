@@ -2262,7 +2262,7 @@ def delete_personal_project(project_id: int, user: dict = Depends(get_current_us
 
 # ── 코드 전달함 (Snippets) — 맥↔회사 노트북 코드 브릿지 ──────────
 
-ALLOWED_SNIPPET_KIND = {"single", "tb4"}
+ALLOWED_SNIPPET_KIND = {"single", "tb4", "note"}  # note = 코드 아닌 텍스트 메모 (본문은 content 재사용)
 SNIPPET_MAX = 200000  # 코드 한 칸 최대 길이 (≈200KB)
 
 
