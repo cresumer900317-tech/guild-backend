@@ -7,7 +7,7 @@ import unicodedata
 import secrets as _secrets
 import jwt
 from pydantic import BaseModel, field_validator, Field
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
@@ -87,8 +87,8 @@ def create_access_token(character_name: str, role: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def get_current_user(authorization: str = Header(None)) -> dict:
-    """Authorization: Bearer <token> 헤더에서 유저 정보 추출"""
+def _decode_bearer(authorization: Optional[str]) -> dict:
+    """Authorization: Bearer <token> 헤더 검증·디코드 (role 구분 없이 공용)"""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="로그인이 필요합니다")
     token = authorization.split(" ", 1)[1]
@@ -99,6 +99,14 @@ def get_current_user(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="토큰이 만료됐습니다. 다시 로그인해주세요")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
+
+
+def get_current_user(authorization: str = Header(None)) -> dict:
+    """길드 API용 유저 추출 — ICP 브릿지 토큰(role=icp)은 길드 API에 못 들어옴 (양방향 분리)"""
+    user = _decode_bearer(authorization)
+    if user.get("role") == "icp":
+        raise HTTPException(status_code=403, detail="ICP 토큰으로는 접근할 수 없습니다")
+    return user
 
 
 def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
@@ -114,6 +122,8 @@ def get_optional_user(authorization: str = Header(None)) -> Optional[dict]:
         return None
     try:
         payload = jwt.decode(authorization.split(" ", 1)[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("role") == "icp":   # ICP 토큰은 길드에선 비로그인 취급
+            return None
         return {"character_name": payload["sub"], "role": payload.get("role", "member")}
     except Exception:
         return None
@@ -286,7 +296,7 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     # 친구들.com(=xn--2e0br5l24w.com), jisoar.com(개인 브랜드·/hq 개인업무앱 이전), *.github.io, localhost 만 허용.
-    allow_origin_regex=r"^https://(www\.)?xn--2e0br5l24w\.com$|^https://(www\.)?jisoar\.com$|^https://[a-z0-9-]+\.github\.io$|^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=r"^https://(www\.)?xn--2e0br5l24w\.com$|^https://(www\.)?jisoar\.com$|^https://cresumer900317-tech\.github\.io$|^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2384,8 +2394,47 @@ def clear_personal_snippets(user: dict = Depends(get_current_user)):
 # 운영: Railway 환경변수 ICP_ACCESS_CODE 에 접속코드 설정 (미설정 시 로그인 차단).
 # 테이블: icp_snippets (personal_snippets와 동일 칼럼 + owner 대신 author, 전원 공유)
 ICP_ACCESS_CODE = os.environ.get("ICP_ACCESS_CODE", "").strip()
-# 고정 사용자 — 탭/작성자 무결성 보장. 인원 추가는 Railway 환경변수 ICP_MEMBERS="Jett,Minhyun,새이름"
-ICP_MEMBERS = {m.strip() for m in os.environ.get("ICP_MEMBERS", "Jett,Minhyun").split(",") if m.strip()}
+
+# 개인별 접속코드 — ICP_ACCESS_CODES="Jett:코드,Minhyun:코드" 형식.
+# 설정돼 있으면 공용 ICP_ACCESS_CODE 는 무시되고, 본인 이름+본인 코드 조합만 로그인 가능.
+ICP_ACCESS_CODES: dict = {}
+for _pair in os.environ.get("ICP_ACCESS_CODES", "").split(","):
+    if ":" in _pair:
+        _n, _c = _pair.split(":", 1)
+        if _n.strip() and _c.strip():
+            ICP_ACCESS_CODES[_n.strip()] = _c.strip()
+
+# 고정 사용자 — 개인코드가 있으면 그 이름들이 곧 허용목록, 없으면 ICP_MEMBERS 폴백
+ICP_MEMBERS = set(ICP_ACCESS_CODES) or \
+    {m.strip() for m in os.environ.get("ICP_MEMBERS", "Jett,Minhyun").split(",") if m.strip()}
+
+# 로그인 실패 잠금 — IP당 10분 안에 5회 실패하면 그 IP는 창이 빌 때까지 차단(성공 시 초기화)
+ICP_FAIL_MAX = 5
+ICP_FAIL_WINDOW = 600  # 초
+_icp_fails: dict = {}  # ip -> [실패 시각(epoch), ...]
+
+
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _icp_guard_bruteforce(ip: str):
+    now = _time.time()
+    fails = [t for t in _icp_fails.get(ip, []) if now - t < ICP_FAIL_WINDOW]
+    _icp_fails[ip] = fails
+    if len(fails) >= ICP_FAIL_MAX:
+        raise HTTPException(status_code=429, detail="로그인 시도가 너무 많아요. 10분 뒤에 다시 시도해주세요")
+
+
+def _icp_record_fail(ip: str):
+    _icp_fails.setdefault(ip, []).append(_time.time())
+    if len(_icp_fails) > 10000:  # 메모리 방어 — 오래된 IP 엔트리 정리
+        cutoff = _time.time() - ICP_FAIL_WINDOW
+        for k in [k for k, v in _icp_fails.items() if not v or v[-1] < cutoff]:
+            _icp_fails.pop(k, None)
 
 
 class IcpLoginRequest(BaseModel):
@@ -2394,7 +2443,7 @@ class IcpLoginRequest(BaseModel):
 
 
 def get_icp_user(authorization: str = Header(None)) -> dict:
-    user = get_current_user(authorization)
+    user = _decode_bearer(authorization)
     if user.get("role") != "icp":
         raise HTTPException(status_code=403, detail="ICP 접근 권한이 없습니다")
     raw = user["character_name"]
@@ -2402,14 +2451,21 @@ def get_icp_user(authorization: str = Header(None)) -> dict:
 
 
 @app.post("/api/icp/login")
-def icp_login(req: IcpLoginRequest):
-    if not ICP_ACCESS_CODE:
+def icp_login(req: IcpLoginRequest, request: Request):
+    if not ICP_ACCESS_CODES and not ICP_ACCESS_CODE:
         raise HTTPException(status_code=503, detail="접속코드가 아직 설정되지 않았어요 (관리자에게 문의)")
+    ip = _client_ip(request)
+    _icp_guard_bruteforce(ip)
     name = (req.name or "").strip()
+    code = (req.code or "").strip()
     if name not in ICP_MEMBERS:
-        raise HTTPException(status_code=400, detail="등록된 사용자가 아니에요 (Jett / Minhyun)")
-    if not _secrets.compare_digest((req.code or "").strip(), ICP_ACCESS_CODE):
+        _icp_record_fail(ip)
+        raise HTTPException(status_code=400, detail="등록된 사용자가 아니에요")
+    expected = ICP_ACCESS_CODES.get(name, "") if ICP_ACCESS_CODES else ICP_ACCESS_CODE
+    if not expected or not _secrets.compare_digest(code, expected):
+        _icp_record_fail(ip)
         raise HTTPException(status_code=401, detail="접속코드가 올바르지 않아요")
+    _icp_fails.pop(ip, None)
     return {"token": create_access_token(f"icp:{name}", role="icp"), "name": name}
 
 
