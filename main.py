@@ -425,11 +425,45 @@ def update_pop_rank(admin: dict = Depends(require_admin)):
 
 @app.get("/api/weekly")
 def get_weekly():
-    result = supabase.table("members")\
-        .select("*")\
-        .order("weekly_diff", desc=True)\
-        .execute()
-    return to_camel(result.data)
+    """주간 성장 랭킹 — server_ranking_history의 ~7일 전 스냅샷 대비 멤버별 전투력 성장.
+    (기존 members.weekly_diff 정렬은 크롤이 채우지 않는 죽은 필드라 실데이터로 교체.
+    guild-health 성장축과 같은 기준일 로직. 이력 없으면 diff=0·hasWeeklyBase=false.)"""
+    cached = cache_get("weekly_growth", 600)
+    if cached is not None:
+        return cached
+    members = supabase.table("members").select("*").execute().data or []
+
+    base_date, old_rows = None, {}
+    try:
+        target = (datetime.now(_KST).date() - timedelta(days=6)).isoformat()
+        base = (supabase.table("server_ranking_history").select("snapshot_date")
+                .lte("snapshot_date", target).order("snapshot_date", desc=True)
+                .limit(1).execute())
+        if base.data:
+            base_date = base.data[0]["snapshot_date"]
+            guilds = sorted({_nfc(m.get("guild")) for m in members if m.get("guild")})
+            res = (supabase.table("server_ranking_history").select("name,power,server_rank")
+                   .eq("snapshot_date", base_date).in_("guild", guilds).execute())
+            for r in res.data or []:
+                old_rows[_nfc(r.get("name"))] = r
+    except Exception as e:
+        print(f"[weekly] 성장 이력 조회 스킵: {repr(e)[:120]}")
+
+    out = []
+    for m in members:
+        row = dict(m)
+        p_now = int(m.get("power") or 0)
+        base_row = old_rows.get(_nfc(m.get("name")))
+        p_old = int(base_row.get("power") or 0) if base_row else 0
+        has_base = bool(p_now and p_old)
+        row["weekly_diff"] = (p_now - p_old) if has_base else 0
+        row["weekly_growth_rate"] = round((p_now / p_old - 1.0) * 100, 2) if has_base else None
+        row["weekly_base_power"] = p_old or None
+        row["weekly_base_date"] = base_date if has_base else None
+        row["has_weekly_base"] = has_base
+        out.append(row)
+    out.sort(key=lambda r: r["weekly_diff"], reverse=True)
+    return cache_set("weekly_growth", to_camel(out))
 
 
 @app.post("/api/snapshot-pop-backfill")
@@ -1352,29 +1386,6 @@ def list_blocks(user: dict = Depends(get_current_user)):
     return [r["blocked"] for r in rows]
 
 
-# ── 실시간 채팅용 Supabase 토큰 브리지 ───────────────────────────
-# 자체 JWT로 로그인한 유저에게 Supabase Realtime/RLS 호환 JWT(HS256)를 발급.
-# Railway 환경변수 SUPABASE_JWT_SECRET (Supabase 프로젝트 JWT Secret) 필요.
-SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
-
-
-@app.get("/api/realtime-token")
-def realtime_token(user: dict = Depends(get_current_user)):
-    """채팅(Supabase Realtime)용 토큰. RLS에서 role=authenticated, sub=캐릭터명으로 인가."""
-    if not SUPABASE_JWT_SECRET:
-        raise HTTPException(status_code=503, detail="실시간 채팅이 아직 설정되지 않았습니다")
-    now = datetime.utcnow()
-    payload = {
-        "sub": user["character_name"],
-        "role": "authenticated",
-        "aud": "authenticated",
-        "iat": now,
-        "exp": now + timedelta(hours=12),
-    }
-    token = jwt.encode(payload, SUPABASE_JWT_SECRET, algorithm="HS256")
-    return {"token": token}
-
-
 # ── 공지사항 API ──────────────────────────────────────────────
 
 @app.get("/api/notices")
@@ -1595,8 +1606,8 @@ def change_role(req: RoleChangeRequest, admin: dict = Depends(require_admin)):
 @app.post("/api/visitors/ping")
 def visitor_ping(req: VisitorPing):
     """방문자 핑 (페이지 로드시 호출)"""
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
+    now = datetime.now()  # last_seen은 UTC naive 유지 — stats의 5분 온라인 창과 같은 기준
+    today = datetime.now(_KST).strftime("%Y-%m-%d")  # 일별 경계는 KST (Railway=UTC라 어긋나던 버그)
 
     # visitors 테이블 upsert (session_id 기준)
     existing = supabase.table("visitors")        .select("id, created_at")        .eq("session_id", req.session_id)        .execute()
@@ -1626,8 +1637,8 @@ def get_visitor_stats():
     cached = cache_get("visitor_stats", 20)   # 접속자수 20초 staleness 허용(잦은 호출 부하 완화)
     if cached is not None:
         return cached
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
+    now = datetime.now()  # 온라인 5분 창은 UTC naive (ping의 last_seen과 같은 기준)
+    today = datetime.now(_KST).strftime("%Y-%m-%d")  # 일별 경계는 KST
 
     # 오늘 방문자
     today_stat = supabase.table("visit_stats")        .select("count").eq("date", today).execute()
