@@ -463,7 +463,13 @@ def get_weekly():
         row["has_weekly_base"] = has_base
         out.append(row)
     out.sort(key=lambda r: r["weekly_diff"], reverse=True)
-    return cache_set("weekly_growth", to_camel(out))
+    payload = to_camel(out)
+    for row, src in zip(payload, out):  # to_camel은 고정 화이트리스트라 주간 부가필드는 직접 병합
+        row["weeklyGrowthRate"] = src["weekly_growth_rate"]
+        row["weeklyBasePower"] = src["weekly_base_power"]
+        row["weeklyBaseDate"] = src["weekly_base_date"]
+        row["hasWeeklyBase"] = src["has_weekly_base"]
+    return cache_set("weekly_growth", payload)
 
 
 @app.post("/api/snapshot-pop-backfill")
