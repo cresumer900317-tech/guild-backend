@@ -309,6 +309,10 @@ try:
 except Exception as _e:
     print(f"[wedding] ensure_table skipped: {_e}")
 
+# 만수로그 (반려묘 몸무게 기록)
+from mansu import router as mansu_router  # noqa: E402
+app.include_router(mansu_router)
+
 
 @app.get("/")
 def root():
