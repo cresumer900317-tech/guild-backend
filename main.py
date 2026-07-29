@@ -231,6 +231,7 @@ class TipCreate(BaseModel):
     category: str = "일반"
     author: str = ""
     author_guild: str = ""
+    members_only: bool = False  # 길드원 전용 — 비로그인 열람 불가
 
 class MacroCommentCreate(BaseModel):
     content: str
@@ -1432,12 +1433,14 @@ def delete_notice(notice_id: int, admin: dict = Depends(require_admin)):
 # ── 꿀팁 API ──────────────────────────────────────────────────
 
 @app.get("/api/tips")
-def get_tips(category: str = None, summary: bool = False):
+def get_tips(category: str = None, summary: bool = False, user: Optional[dict] = Depends(get_optional_user)):
     # summary=true 면 본문(content) 제외하고 목록용 가벼운 컬럼만 반환 (모바일 앱 목록 속도용).
-    cols = "id,title,author,author_guild,likes,views,created_at,category" if summary else "*"
+    cols = "id,title,author,author_guild,likes,views,created_at,category,members_only" if summary else "*"
     query = supabase.table("tips").select(cols).order("created_at", desc=True)
     if category:
         query = query.eq("category", category)
+    if not user:
+        query = query.eq("members_only", False)
     result = query.execute()
     return result.data or []
 
@@ -1451,6 +1454,7 @@ def create_tip(req: TipCreate, user: dict = Depends(get_current_user)):
     result = supabase.table("tips").insert({
         "title": title, "content": content, "category": req.category,
         "author": author, "author_guild": req.author_guild, "likes": 0, "views": 0,
+        "members_only": bool(req.members_only),
     }).execute()
     award_board_points(author, "tip", req.author_guild)
     return result.data[0] if result.data else {}
@@ -1461,6 +1465,8 @@ def get_tip(tip_id: int, user: Optional[dict] = Depends(get_optional_user)):
     if not result.data:
         raise HTTPException(status_code=404, detail="없는 게시글")
     post = result.data[0]
+    if post.get("members_only") and not user:
+        raise HTTPException(status_code=403, detail="길드원 전용 글입니다. 로그인 후 이용해주세요.")
     post["liked"] = _did_like("tip", tip_id, user["character_name"] if user else None)
     return post
 
