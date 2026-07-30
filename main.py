@@ -501,6 +501,9 @@ def get_monthly():
     monthly_snapshots에서 이번 달 스냅샷(월초 전투력)을 가져와
     현재 members 테이블과 비교해 성장량을 계산한다.
     """
+    cached = cache_get("monthly", 300)   # members 크롤(1h) 때만 변경 → 5분 캐시 (홈 첫 로딩 최다 지연 지점)
+    if cached is not None:
+        return cached
     now = datetime.now(_KST)  # Railway=UTC라 KST 명시 (월 경계 9시간 어긋남 방지)
     snapshot_month = now.strftime("%Y-%m")
 
@@ -578,7 +581,7 @@ def get_monthly():
 
     # 성장량 기준 정렬 (null은 뒤로)
     result.sort(key=lambda x: x.get("monthlyDiff") or -999999999, reverse=True)
-    return result
+    return cache_set("monthly", result)
 
 
 @app.get("/api/home-summary")
@@ -668,24 +671,31 @@ def update_guild_ranks(admin: dict = Depends(require_admin)):
 @app.get("/api/guild-ranks")
 def get_guild_ranks():
     """친구 길드들의 스카니아11 서버 길드순위 (서버순위 오름차순)"""
+    cached = cache_get("guild_ranks", 300)
+    if cached is not None:
+        return cached
     data = supabase.table("guild_server_ranks").select("*").order("server_rank").execute()
-    return [{
+    return cache_set("guild_ranks", [{
         "guildName": r.get("guild_name"),
         "serverRank": r.get("server_rank"),
         "guildLevel": r.get("guild_level"),
         "memberCount": r.get("member_count"),
         "totalPower": r.get("total_power"),
         "capturedAt": r.get("captured_at"),
-    } for r in (data.data or [])]
+    } for r in (data.data or [])])
 
 
 @app.get("/api/server-guild-ranking")
 def get_server_guild_ranking(limit: int = 30):
     """스카니아11 서버 전체 길드 랭킹 (서버순위 오름차순). 테이블 미생성/데이터 없음 시 빈 배열."""
+    ckey = f"server_guild_ranking_{limit}"
+    cached = cache_get(ckey, 300)
+    if cached is not None:
+        return cached
     try:
         res = (supabase.table("server_guild_ranking").select("*")
                .order("guild_rank").limit(max(1, min(limit, 100))).execute())
-        return [{
+        return cache_set(ckey, [{
             "guildRank": r.get("guild_rank"),
             "guildName": r.get("guild_name"),
             "level": r.get("level"),
@@ -695,7 +705,7 @@ def get_server_guild_ranking(limit: int = 30):
             "lowPower": r.get("low_power"),
             "avgMemberPower": r.get("avg_member_power"),
             "capturedAt": r.get("captured_at"),
-        } for r in (res.data or [])]
+        } for r in (res.data or [])])
     except Exception as e:
         print(f"[server-guild-ranking] {e}")
         return []
@@ -821,12 +831,15 @@ def update_server_boss_ranking(admin: dict = Depends(require_admin)):
 @app.get("/api/server-stats")
 def get_server_stats():
     """스카니아11 서버 요약 통계 (홈 히어로용). server_ranking 등재 전체 인원."""
+    cached = cache_get("server_stats", 600)
+    if cached is not None:
+        return cached
     try:
         cnt = supabase.table("server_ranking").select("server_rank", count="exact").limit(1).execute().count or 0
     except Exception as e:
         print(f"[server-stats] {e}")
         cnt = 0
-    return {"totalPlayers": cnt}
+    return cache_set("server_stats", {"totalPlayers": cnt})
 
 
 @app.get("/api/server-ranking")
@@ -1656,13 +1669,11 @@ def get_visitor_stats():
     now = datetime.now()  # 온라인 5분 창은 UTC naive (ping의 last_seen과 같은 기준)
     today = datetime.now(_KST).strftime("%Y-%m-%d")  # 일별 경계는 KST
 
-    # 오늘 방문자
-    today_stat = supabase.table("visit_stats")        .select("count").eq("date", today).execute()
-    today_count = today_stat.data[0]["count"] if today_stat.data else 0
-
-    # 전체 방문자
-    all_stats = supabase.table("visit_stats").select("count").execute()
-    total_count = sum(r["count"] for r in (all_stats.data or []))
+    # 오늘/전체 방문자 — 한 쿼리로 (순차 왕복 2회 → 1회)
+    all_stats = supabase.table("visit_stats").select("date, count").execute()
+    rows = all_stats.data or []
+    today_count = next((r["count"] for r in rows if r.get("date") == today), 0)
+    total_count = sum(r["count"] for r in rows)
 
     # 현재 접속자 (최근 5분)
     from datetime import timedelta

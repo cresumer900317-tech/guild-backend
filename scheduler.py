@@ -165,7 +165,7 @@ def run_crawl():
                 logger.warning("[크롤링] insert 반환에 id 없음 — 이전 행 정리 건너뜀")
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
-        _invalidate_cache("home_summary")
+        _invalidate_cache("home_summary", "monthly")
         _track_job("크롤링", ok=bool(members), detail="mgf.gg 멤버 크롤 결과가 비어있어요.")
         return members
 
@@ -267,6 +267,7 @@ def run_guild_rank_update():
             "captured_at": datetime.now().isoformat(),
         } for gname, info in ranks.items()]
         supabase.table("guild_server_ranks").upsert(rows, on_conflict="guild_name").execute()
+        _invalidate_cache("guild_ranks")
         logger.info(f"=== [길드 랭킹] 완료: {len(rows)}개 길드 ===")
     except Exception as e:
         logger.error(f"[길드 랭킹] 오류: {e}")
@@ -298,7 +299,7 @@ def run_server_guild_update():
             _time.sleep(0.4)
         supabase.table("server_guild_ranking").delete().neq("guild_rank", 0).execute()
         supabase.table("server_guild_ranking").insert(rows).execute()
-        _invalidate_cache("guild_health_*")
+        _invalidate_cache("guild_health_*", "server_guild_ranking_*")
         logger.info(f"=== [서버 길드] 완료: {len(rows)}개 저장(균형 포함) ===")
     except Exception as e:
         logger.error(f"[서버 길드] 오류: {e}")
@@ -357,7 +358,7 @@ def run_server_top_update():
         CHUNK = 500
         for i in range(0, len(rows), CHUNK):
             supabase.table("server_ranking").insert(rows[i:i + CHUNK]).execute()
-        _invalidate_cache("server_ranking_rows", "home_summary", "guild_health_*")
+        _invalidate_cache("server_ranking_rows", "home_summary", "guild_health_*", "server_stats")
         logger.info(f"=== [서버 전체] 완료: {len(rows)}명 저장 ===")
 
         # 일별 이력 적립(프로필 성장 그래프용). 테이블(server_ranking_history) 없으면 조용히 스킵.
