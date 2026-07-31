@@ -1693,6 +1693,87 @@ def get_visitor_stats():
     })
 
 
+# ── 운영개편 배치 보드 (운영진 전용) ─────────────────────────
+# 옵트인 명단을 5개 길드에 배치하고 인게임 이동을 추적. 테이블: sql/reorg.sql
+
+REORG_GUILDS = {"친구들", "친구둘", "친구삼", "친구넷", "친구닷"}
+
+
+class ReorgAddRequest(BaseModel):
+    names: list[str]
+
+
+class ReorgPatchRequest(BaseModel):
+    assigned_guild: Optional[str] = None   # REORG_GUILDS 중 하나
+    clear_guild: bool = False              # true면 미배치로 (moved도 리셋)
+    moved: Optional[bool] = None
+
+
+def _reorg_table_guard(e: Exception):
+    if "reorg_board" in repr(e):
+        raise HTTPException(status_code=500, detail="reorg_board 테이블이 없어요 — sql/reorg.sql을 Supabase SQL Editor에서 실행해주세요")
+    raise HTTPException(status_code=500, detail=f"배치 보드 오류: {repr(e)[:120]}")
+
+
+@app.get("/api/admin/reorg")
+def reorg_list(admin: dict = Depends(require_admin)):
+    try:
+        res = supabase.table("reorg_board").select("*").order("id").execute()
+        return res.data or []
+    except Exception as e:
+        _reorg_table_guard(e)
+
+
+@app.post("/api/admin/reorg")
+def reorg_add(req: ReorgAddRequest, admin: dict = Depends(require_admin)):
+    names = []
+    for n in req.names:
+        n = _nfc(n)
+        if n and len(n) <= 30 and n not in names:
+            names.append(n)
+    if not names:
+        return {"added": 0}
+    try:
+        supabase.table("reorg_board").upsert(
+            [{"character_name": n} for n in names],
+            on_conflict="character_name", ignore_duplicates=True,
+        ).execute()
+        return {"added": len(names)}
+    except Exception as e:
+        _reorg_table_guard(e)
+
+
+@app.patch("/api/admin/reorg/{rid}")
+def reorg_patch(rid: int, req: ReorgPatchRequest, admin: dict = Depends(require_admin)):
+    upd = {}
+    if req.clear_guild:
+        upd["assigned_guild"] = None
+        upd["moved"] = False
+    elif req.assigned_guild is not None:
+        if req.assigned_guild not in REORG_GUILDS:
+            raise HTTPException(status_code=400, detail="길드명이 올바르지 않습니다")
+        upd["assigned_guild"] = req.assigned_guild
+    if req.moved is not None:
+        upd["moved"] = req.moved
+    if not upd:
+        raise HTTPException(status_code=400, detail="변경 내용이 없습니다")
+    upd["updated_at"] = datetime.now().isoformat()
+    try:
+        supabase.table("reorg_board").update(upd).eq("id", rid).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        _reorg_table_guard(e)
+
+
+@app.delete("/api/admin/reorg/{rid}")
+def reorg_delete(rid: int, admin: dict = Depends(require_admin)):
+    try:
+        supabase.table("reorg_board").delete().eq("id", rid).execute()
+        return {"status": "ok"}
+    except Exception as e:
+        _reorg_table_guard(e)
+
+
 # ── 매크로 인증 / 다운로드 API ───────────────────────────────
 
 MACRO_DIR = os.path.join(os.path.dirname(__file__), "macro_files")
