@@ -1876,6 +1876,65 @@ def del_home_video(vid: int, admin: dict = Depends(require_admin)):
     return {"status": "ok"}
 
 
+# ── 인기 검색어 / 순위 계산기 ────────────────────────────────
+
+class SearchLogRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/search-log")
+def add_search_log(req: SearchLogRequest):
+    """전적검색 성공 시 기록 (공개). 인기 검색어 집계용."""
+    n = _nfc(req.name)
+    if not n or len(n) > 30:
+        return {"status": "skip"}
+    try:
+        supabase.table("search_log").insert({"name": n}).execute()
+    except Exception as e:
+        print(f"[search-log] {repr(e)[:60]}")
+    return {"status": "ok"}
+
+
+@app.get("/api/popular-searches")
+def get_popular_searches(limit: int = 8):
+    """최근 7일 인기 검색어 TOP N (홈 히어로 칩)"""
+    cached = cache_get("popular_searches", 600)
+    if cached is not None:
+        return cached
+    try:
+        from collections import Counter
+        since = (datetime.now(_KST) - timedelta(days=7)).isoformat()
+        res = (supabase.table("search_log").select("name")
+               .gte("searched_at", since).order("id", desc=True).limit(3000).execute())
+        counts = Counter(r["name"] for r in (res.data or []))
+        out = [{"name": n, "count": c} for n, c in counts.most_common(max(1, min(limit, 20)))]
+        return cache_set("popular_searches", out)
+    except Exception as e:
+        print(f"[popular-searches] {repr(e)[:60]}")
+        return []
+
+
+@app.get("/api/rank-estimate")
+def rank_estimate(power: int):
+    """전투력 → 스카니아11 서버 예상 순위 (순위 계산기)"""
+    rows = load_server_ranking_rows()
+    powers = sorted((int(r.get("power") or 0) for r in rows if r.get("power")), reverse=True)
+    total = len(powers)
+    if not total:
+        return {"total": 0}
+    higher = sum(1 for p in powers if p > power)
+    rank = higher + 1
+    milestones = {}
+    for label, idx in (("top100", 99), ("top500", 499), ("top1000", 999)):
+        if total > idx and powers[idx] > power:
+            milestones[label] = powers[idx] - power   # 해당 순위 진입까지 부족한 전투력
+    return {
+        "rank": rank, "total": total,
+        "percentile": round(rank / total * 100, 1),
+        "needed": milestones,
+    }
+
+
 # ── 메키 공식 공지 프록시 (넥슨 커뮤니티 API, 30분 캐시) ──────
 
 @app.get("/api/official-notices")
