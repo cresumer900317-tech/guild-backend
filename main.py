@@ -1951,7 +1951,7 @@ def get_official_notices():
             "&blockSize=10&hideType=WEB&headlineId=&searchKeywordType=THREAD_TITLE_AND_CONTENT&keywords=")
     out = []
     try:
-        for board_id, kind, size in (("6633", "공지", 4), ("6698", "패치", 3)):
+        for board_id, kind, size in (("6633", "공지", 4), ("6698", "패치", 3), ("6697", "이벤트", 3)):
             r = _httpx.get(base.format(board_id, size),
                            headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
             for t in (r.json().get("threads") or []):
@@ -1963,7 +1963,7 @@ def get_official_notices():
                     "url": f"https://forum.nexon.com/maplestoryidle-kr/board_view?board={board_id}&thread={t.get('threadId')}",
                 })
         out.sort(key=lambda x: x.get("date") or "", reverse=True)
-        return cache_set("official_notices", out[:6])
+        return cache_set("official_notices", out[:9])
     except Exception as e:
         print(f"[official-notices] {repr(e)[:80]}")
         stale = cache_get("official_notices", 86400)   # 넥슨 API 실패 시 하루까지 이전 값 유지
