@@ -4,7 +4,7 @@ from apscheduler.triggers.cron import CronTrigger
 from database import supabase
 from fetch_mgf import fetch_mgf_data
 from transform import transform_data
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import logging
 
@@ -22,6 +22,22 @@ def _invalidate_cache(*keys):
         cache_clear(*keys)
     except Exception:
         pass
+
+
+def _warm_home_caches():
+    """홈 API 응답 캐시 예열 — 무효화 직후 재계산 비용(guild-health 최대 ~6s)을 방문자 대신 미리 부담.
+    캐시가 살아있는 키는 즉시 반환되므로 반복 호출 부담 없음. 지연 import로 순환참조 회피."""
+    try:
+        import main
+        main.load_server_ranking_rows()
+        main.get_monthly()
+        main.get_guild_ranks()
+        main.get_server_guild_ranking(30)
+        main.get_server_stats()
+        main.get_guild_health(30)
+        main.get_home_summary()
+    except Exception as e:
+        logger.warning(f"[캐시 예열] {repr(e)[:120]}")
 
 
 # 크롤 잡별 연속 실패 카운터 — 임계 도달 시 운영진 푸시 1회(성공하면 리셋).
@@ -165,7 +181,8 @@ def run_crawl():
                 logger.warning("[크롤링] insert 반환에 id 없음 — 이전 행 정리 건너뜀")
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
-        _invalidate_cache("home_summary", "monthly")
+        _invalidate_cache("home_summary", "monthly", "weekly_growth")
+        _warm_home_caches()
         _track_job("크롤링", ok=bool(members), detail="mgf.gg 멤버 크롤 결과가 비어있어요.")
         return members
 
@@ -300,6 +317,7 @@ def run_server_guild_update():
         supabase.table("server_guild_ranking").delete().neq("guild_rank", 0).execute()
         supabase.table("server_guild_ranking").insert(rows).execute()
         _invalidate_cache("guild_health_*", "server_guild_ranking_*")
+        _warm_home_caches()
         logger.info(f"=== [서버 길드] 완료: {len(rows)}개 저장(균형 포함) ===")
     except Exception as e:
         logger.error(f"[서버 길드] 오류: {e}")
@@ -359,6 +377,7 @@ def run_server_top_update():
         for i in range(0, len(rows), CHUNK):
             supabase.table("server_ranking").insert(rows[i:i + CHUNK]).execute()
         _invalidate_cache("server_ranking_rows", "home_summary", "guild_health_*", "server_stats")
+        _warm_home_caches()
         logger.info(f"=== [서버 전체] 완료: {len(rows)}명 저장 ===")
 
         # 일별 이력 적립(프로필 성장 그래프용). 테이블(server_ranking_history) 없으면 조용히 스킵.
@@ -406,6 +425,9 @@ def start_scheduler():
 
     # 6시간마다 스카니아11 서버 전체 길드 랭킹 Top30 — 시작 직후 1회 (가벼워 프록시 불필요)
     scheduler.add_job(run_server_guild_update, IntervalTrigger(hours=6), next_run_time=now)
+
+    # 10분마다 홈 캐시 예열 — 재기동/수동 무효화 등으로 식은 캐시를 방문자가 아닌 서버가 데운다
+    scheduler.add_job(_warm_home_caches, IntervalTrigger(minutes=10), next_run_time=now + timedelta(minutes=2))
 
     # 6시간마다 스카니아11 서버 전체 보스(토벌전·월드보스) Top100 — 시작 직후 1회
     scheduler.add_job(run_server_boss_update, IntervalTrigger(hours=6), next_run_time=now)

@@ -63,7 +63,8 @@ _SR_MAX = 7000   # 캐시는 항상 전체를 담는다(요청 limit 무관) —
 def load_server_ranking_rows(limit: int = _SR_MAX):
     """server_ranking 전체를 읽어 캐시(10분) 후 limit만큼 slice. server-ranking·guild-health 공유.
     ⚠️ 캐시 키는 limit 무관(항상 전체 저장) — limit=100 호출이 전체 캐시를 망치지 않도록."""
-    cached = cache_get("server_ranking_rows", 600)
+    # TTL은 크롤 주기(12h)보다 길게 — 신선도는 크롤 후 _invalidate_cache가 보장, 만료형 콜드미스(~5s) 제거
+    cached = cache_get("server_ranking_rows", 43500)
     if cached is None:
         out, step, start = [], 1000, 0
         while start < _SR_MAX:
@@ -433,7 +434,7 @@ def get_weekly():
     """주간 성장 랭킹 — server_ranking_history의 ~7일 전 스냅샷 대비 멤버별 전투력 성장.
     (기존 members.weekly_diff 정렬은 크롤이 채우지 않는 죽은 필드라 실데이터로 교체.
     guild-health 성장축과 같은 기준일 로직. 이력 없으면 diff=0·hasWeeklyBase=false.)"""
-    cached = cache_get("weekly_growth", 600)
+    cached = cache_get("weekly_growth", 3900)   # 크롤(1h) 후 무효화가 신선도 보장
     if cached is not None:
         return cached
     members = supabase.table("members").select("*").execute().data or []
@@ -501,7 +502,7 @@ def get_monthly():
     monthly_snapshots에서 이번 달 스냅샷(월초 전투력)을 가져와
     현재 members 테이블과 비교해 성장량을 계산한다.
     """
-    cached = cache_get("monthly", 300)   # members 크롤(1h) 때만 변경 → 5분 캐시 (홈 첫 로딩 최다 지연 지점)
+    cached = cache_get("monthly", 3900)   # members 크롤(1h) 후 무효화가 신선도 보장 — TTL은 만료형 콜드미스 방지용 여유치
     if cached is not None:
         return cached
     now = datetime.now(_KST)  # Railway=UTC라 KST 명시 (월 경계 9시간 어긋남 방지)
@@ -586,7 +587,7 @@ def get_monthly():
 
 @app.get("/api/home-summary")
 def get_home_summary():
-    cached = cache_get("home_summary", 300)   # 데이터는 크롤(시간단위)때만 변경 → 5분 캐시
+    cached = cache_get("home_summary", 3900)   # 크롤(1h) 후 무효화가 신선도 보장
     if cached is not None:
         return cached
     members = fetch_members_raw()
@@ -671,7 +672,7 @@ def update_guild_ranks(admin: dict = Depends(require_admin)):
 @app.get("/api/guild-ranks")
 def get_guild_ranks():
     """친구 길드들의 스카니아11 서버 길드순위 (서버순위 오름차순)"""
-    cached = cache_get("guild_ranks", 300)
+    cached = cache_get("guild_ranks", 3900)   # 크롤(1h) 후 무효화가 신선도 보장
     if cached is not None:
         return cached
     data = supabase.table("guild_server_ranks").select("*").order("server_rank").execute()
@@ -689,7 +690,7 @@ def get_guild_ranks():
 def get_server_guild_ranking(limit: int = 30):
     """스카니아11 서버 전체 길드 랭킹 (서버순위 오름차순). 테이블 미생성/데이터 없음 시 빈 배열."""
     ckey = f"server_guild_ranking_{limit}"
-    cached = cache_get(ckey, 300)
+    cached = cache_get(ckey, 21900)   # 크롤(6h) 후 무효화가 신선도 보장
     if cached is not None:
         return cached
     try:
@@ -716,7 +717,7 @@ def get_guild_health(limit: int = 30):
     """길드 건강도용 경량 집계 — 길드별 멤버 분포(중앙값·유효기여자수·활동비율)를 서버에서 계산.
     프론트가 server-ranking 전체(1MB+)를 받지 않도록 통계만 반환. 캐시 5분."""
     ckey = f"guild_health_{limit}"
-    cached = cache_get(ckey, 300)
+    cached = cache_get(ckey, 21900)   # 서버길드(6h)·서버전체(12h) 크롤 후 무효화가 신선도 보장
     if cached is not None:
         return cached
     try:
@@ -831,7 +832,7 @@ def update_server_boss_ranking(admin: dict = Depends(require_admin)):
 @app.get("/api/server-stats")
 def get_server_stats():
     """스카니아11 서버 요약 통계 (홈 히어로용). server_ranking 등재 전체 인원."""
-    cached = cache_get("server_stats", 600)
+    cached = cache_get("server_stats", 43500)   # 서버전체 크롤(12h) 후 무효화가 신선도 보장
     if cached is not None:
         return cached
     try:
