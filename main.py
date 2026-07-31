@@ -1907,7 +1907,9 @@ def get_popular_searches(limit: int = 8):
         res = (supabase.table("search_log").select("name")
                .gte("searched_at", since).order("id", desc=True).limit(3000).execute())
         counts = Counter(r["name"] for r in (res.data or []))
-        out = [{"name": n, "count": c} for n, c in counts.most_common(max(1, min(limit, 20)))]
+        # 표시 조건: 2회 이상 검색된 이름이 3개 이상일 때만 — 트래픽 적을 땐 숨겨서 한산해 보이는 역효과 방지
+        qualified = [(n, c) for n, c in counts.most_common(max(1, min(limit, 20))) if c >= 2]
+        out = [{"name": n, "count": c} for n, c in qualified] if len(qualified) >= 3 else []
         return cache_set("popular_searches", out)
     except Exception as e:
         print(f"[popular-searches] {repr(e)[:60]}")
