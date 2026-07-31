@@ -24,6 +24,73 @@ def _invalidate_cache(*keys):
         pass
 
 
+def _record_changes(old_rows, new_rows, name_key="name"):
+    """크롤 diff → change_log에 길드/직업 변경 기록. 레벨·전투력 추이는 server_ranking_history 그래프 담당."""
+    try:
+        from main import supabase
+        old = {r.get(name_key): r for r in (old_rows or []) if r.get(name_key)}
+        new = {r.get(name_key): r for r in (new_rows or []) if r.get(name_key)}
+        if not old or not new:
+            return
+        logs = []
+        for name, n in new.items():
+            o = old.get(name)
+            if not o:
+                continue
+            for field in ("guild", "job"):
+                ov = str(o.get(field) or "").strip()
+                nv = str(n.get(field) or "").strip()
+                if ov and nv and ov != nv:
+                    logs.append({"name": name, "field": field, "old_value": ov, "new_value": nv})
+        if logs:
+            supabase.table("change_log").insert(logs).execute()
+            logger.info(f"[변경 이력] {len(logs)}건 기록")
+    except Exception as e:
+        logger.warning(f"[변경 이력] 기록 실패: {repr(e)[:100]}")
+
+
+def _detect_rename_suspects(old_rows, new_rows):
+    """길드원 크롤 diff에서 닉변 의심 감지 — 사라진 이름↔새 이름의 직업 일치 + 레벨±3 + 전투력±10%가
+    유일 후보일 때만. 확정은 admin에서 사람이 한다."""
+    try:
+        from main import supabase
+        old = {r["name"]: r for r in (old_rows or []) if r.get("name")}
+        new = {r["name"]: r for r in (new_rows or []) if r.get("name")}
+        gone = [o for k, o in old.items() if k not in new]
+        appeared = [n for k, n in new.items() if k not in old]
+        if not gone or not appeared:
+            return
+        suspects = []
+        for o in gone:
+            op = int(o.get("power") or 0)
+            cands = [
+                n for n in appeared
+                if str(n.get("job") or "") == str(o.get("job") or "")
+                and abs(int(n.get("level") or 0) - int(o.get("level") or 0)) <= 3
+                and (op == 0 or abs(int(n.get("power") or 0) - op) <= max(int(op * 0.1), 1))
+            ]
+            if len(cands) == 1:
+                c = cands[0]
+                suspects.append({
+                    "old_name": o["name"], "new_name": c["name"],
+                    "evidence": f"직업 {o.get('job')} 일치 · Lv {o.get('level')}→{c.get('level')} · 전투력 {op:,}→{int(c.get('power') or 0):,}",
+                })
+        if not suspects:
+            return
+        supabase.table("rename_suspects").upsert(
+            suspects, on_conflict="old_name,new_name", ignore_duplicates=True
+        ).execute()
+        logger.info(f"[닉변 감지] 의심 {len(suspects)}건: " + ", ".join(f"{s['old_name']}→{s['new_name']}" for s in suspects))
+        try:
+            from push_send import notify_admins
+            lines = ", ".join(f"{s['old_name']}→{s['new_name']}" for s in suspects[:3])
+            notify_admins("🔤 닉변 의심 감지", f"{lines} — admin에서 확인해주세요.")
+        except Exception as e:
+            logger.warning(f"[닉변 감지] 푸시 실패: {e}")
+    except Exception as e:
+        logger.warning(f"[닉변 감지] 실패: {repr(e)[:100]}")
+
+
 def _warm_home_caches():
     """홈 API 응답 캐시 예열 — 무효화 직후 재계산 비용(guild-health 최대 ~6s)을 방문자 대신 미리 부담.
     캐시가 살아있는 키는 즉시 반환되므로 반복 호출 부담 없음. 지연 import로 순환참조 회피."""
@@ -162,8 +229,9 @@ def run_crawl():
         members = to_snake(members_camel)
 
         # 별도 잡(인기도/보스 순위)이 채우는 컬럼 보존 — delete/insert 사이 유실 방지
+        # guild/job/level/power는 변경 이력 diff·닉변 감지용으로 같이 읽는다
         KEEP_COLS = ("pop_server_rank", "boss_score", "boss_rank", "wboss_score", "wboss_rank")
-        existing = supabase.table("members").select("name," + ",".join(KEEP_COLS)).execute()
+        existing = supabase.table("members").select("name,guild,job,level,power," + ",".join(KEEP_COLS)).execute()
         keep_map = {m["name"]: {c: m.get(c) for c in KEEP_COLS} for m in (existing.data or [])}
 
         # 새 데이터 insert 후 이전 행 삭제 — delete→insert 사이 API가 0명으로 응답하던 빈 창 제거.
@@ -181,6 +249,8 @@ def run_crawl():
                 logger.warning("[크롤링] insert 반환에 id 없음 — 이전 행 정리 건너뜀")
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
+        _record_changes(existing.data, members)
+        _detect_rename_suspects(existing.data, members)
         _invalidate_cache("home_summary", "monthly", "weekly_growth")
         _warm_home_caches()
         _track_job("크롤링", ok=bool(members), detail="mgf.gg 멤버 크롤 결과가 비어있어요.")
@@ -368,6 +438,12 @@ def run_server_top_update():
             logger.info(f"[서버 전체] 수집 {len(rows)}명 < 기존 {existing_count}×0.8 → 차단 의심, 교체 건너뜀(기존 유지)")
             _track_job("서버 전체", ok=False, detail=f"수집 {len(rows)}/{existing_count}명(차단 의심). 이력도 안 쌓이는 중.")
             return
+        # 교체 전 이전 데이터 확보 — 서버 전체 변경 이력(길드/직업) diff용
+        try:
+            from main import load_server_ranking_rows
+            prev_rows = load_server_ranking_rows()
+        except Exception:
+            prev_rows = []
         now = datetime.now().isoformat()
         for r in rows:
             r["captured_at"] = now
@@ -378,6 +454,7 @@ def run_server_top_update():
             supabase.table("server_ranking").insert(rows[i:i + CHUNK]).execute()
         _invalidate_cache("server_ranking_rows", "home_summary", "guild_health_*", "server_stats")
         _warm_home_caches()
+        _record_changes(prev_rows, rows, name_key="nickname")
         logger.info(f"=== [서버 전체] 완료: {len(rows)}명 저장 ===")
 
         # 일별 이력 적립(프로필 성장 그래프용). 테이블(server_ranking_history) 없으면 조용히 스킵.

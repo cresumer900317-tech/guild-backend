@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, Literal
 import json
 import os
+import re
 import time as _time
 import unicodedata
 import secrets as _secrets
@@ -1781,6 +1782,100 @@ def reorg_delete(rid: int, admin: dict = Depends(require_admin)):
         _reorg_table_guard(e)
 
 
+# ── 쿠폰 / 홈 영상 (admin 등록, 홈 노출) ─────────────────────
+# 테이블: sql/upgrade_2026-07-31.sql
+
+class CouponCreate(BaseModel):
+    code: str
+    reward: Optional[str] = None
+    expires_at: Optional[str] = None   # YYYY-MM-DD
+
+
+class VideoCreate(BaseModel):
+    url: str                            # 유튜브 URL 아무 형식
+    title: Optional[str] = None
+
+
+def _yt_video_id(url: str) -> Optional[str]:
+    """youtube.com/watch?v= · youtu.be/ · shorts/ · embed/ 에서 11자 ID 추출"""
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})", url or "")
+    return m.group(1) if m else None
+
+
+@app.get("/api/coupons")
+def get_coupons():
+    """활성 + 미만료 쿠폰 (홈 노출용, 공개)"""
+    cached = cache_get("coupons", 300)
+    if cached is not None:
+        return cached
+    try:
+        res = supabase.table("coupons").select("*").eq("active", True).order("id", desc=True).execute()
+        today = datetime.now(_KST).strftime("%Y-%m-%d")
+        out = [{
+            "id": r["id"], "code": r["code"], "reward": r.get("reward"),
+            "expiresAt": r.get("expires_at"),
+        } for r in (res.data or []) if not r.get("expires_at") or r["expires_at"] >= today]
+        return cache_set("coupons", out)
+    except Exception as e:
+        print(f"[coupons] {repr(e)[:80]}")
+        return []
+
+
+@app.post("/api/admin/coupons")
+def add_coupon(req: CouponCreate, admin: dict = Depends(require_admin)):
+    code = req.code.strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="쿠폰 코드를 입력해주세요")
+    supabase.table("coupons").upsert({
+        "code": code, "reward": (req.reward or "").strip() or None,
+        "expires_at": req.expires_at or None, "active": True,
+    }, on_conflict="code").execute()
+    cache_clear("coupons")
+    return {"status": "ok"}
+
+
+@app.delete("/api/admin/coupons/{cid}")
+def del_coupon(cid: int, admin: dict = Depends(require_admin)):
+    supabase.table("coupons").delete().eq("id", cid).execute()
+    cache_clear("coupons")
+    return {"status": "ok"}
+
+
+@app.get("/api/home-videos")
+def get_home_videos():
+    """홈 유튜브 섹션 (공개). 썸네일은 프론트가 i.ytimg.com으로 조합."""
+    cached = cache_get("home_videos", 300)
+    if cached is not None:
+        return cached
+    try:
+        res = supabase.table("home_videos").select("*").order("id", desc=True).limit(8).execute()
+        return cache_set("home_videos", [{
+            "id": r["id"], "videoId": r["video_id"], "title": r.get("title"),
+        } for r in (res.data or [])])
+    except Exception as e:
+        print(f"[home-videos] {repr(e)[:80]}")
+        return []
+
+
+@app.post("/api/admin/home-videos")
+def add_home_video(req: VideoCreate, admin: dict = Depends(require_admin)):
+    vid = _yt_video_id(req.url)
+    if not vid:
+        raise HTTPException(status_code=400, detail="유튜브 URL에서 영상 ID를 못 찾았어요")
+    supabase.table("home_videos").upsert({
+        "video_id": vid, "title": (req.title or "").strip() or None,
+    }, on_conflict="video_id").execute()
+    cache_clear("home_videos")
+    return {"status": "ok", "videoId": vid}
+
+
+@app.delete("/api/admin/home-videos/{vid}")
+def del_home_video(vid: int, admin: dict = Depends(require_admin)):
+    supabase.table("home_videos").delete().eq("id", vid).execute()
+    cache_clear("home_videos")
+    return {"status": "ok"}
+
+
 # ── 닉네임 변경 처리 (운영진 전용) ────────────────────────────
 # 게임 내 닉변 시 이름 키로 저장된 모든 데이터를 새 이름으로 이관.
 # members/server_ranking은 크롤이 전량 교체하므로 제외. 없는 테이블/컬럼은 건너뜀.
@@ -1814,15 +1909,8 @@ class RenameRequest(BaseModel):
     new_name: str
 
 
-@app.post("/api/admin/rename")
-def admin_rename(req: RenameRequest, admin: dict = Depends(require_admin)):
-    old, new = _nfc(req.old_name), _nfc(req.new_name)
-    if not old or not new or old == new:
-        raise HTTPException(status_code=400, detail="이전/새 이름을 확인해주세요")
-    dup = supabase.table("users").select("id").eq("character_name", new).execute()
-    if dup.data:
-        raise HTTPException(status_code=409, detail=f"'{new}' 이름의 계정이 이미 있어요")
-    exists = supabase.table("users").select("id").eq("character_name", old).execute()
+def _do_rename(old: str, new: str) -> dict:
+    """이름 키 테이블 일괄 이관 + change_log(nickname) 기록. 호출 전 검증 필수."""
     changed = {}
     for t, col in RENAME_TARGETS:
         try:
@@ -1832,12 +1920,77 @@ def admin_rename(req: RenameRequest, admin: dict = Depends(require_admin)):
                 changed[f"{t}.{col}"] = n
         except Exception as e:
             print(f"[rename] {t}.{col} 건너뜀: {repr(e)[:80]}")
+    try:
+        supabase.table("change_log").insert({
+            "name": new, "field": "nickname", "old_value": old, "new_value": new,
+        }).execute()
+    except Exception as e:
+        print(f"[rename] change_log 기록 건너뜀: {repr(e)[:80]}")
     cache_clear("monthly", "home_summary", "weekly_growth")   # 이름 박힌 응답 캐시 갱신
+    return changed
+
+
+@app.post("/api/admin/rename")
+def admin_rename(req: RenameRequest, admin: dict = Depends(require_admin)):
+    old, new = _nfc(req.old_name), _nfc(req.new_name)
+    if not old or not new or old == new:
+        raise HTTPException(status_code=400, detail="이전/새 이름을 확인해주세요")
+    dup = supabase.table("users").select("id").eq("character_name", new).execute()
+    if dup.data:
+        raise HTTPException(status_code=409, detail=f"'{new}' 이름의 계정이 이미 있어요")
+    exists = supabase.table("users").select("id").eq("character_name", old).execute()
+    changed = _do_rename(old, new)
     return {
         "status": "ok", "old": old, "new": new, "changed": changed,
         "had_account": bool(exists.data),
         "note": "계정이 있던 유저는 새 이름으로 재로그인해야 해요 (기존 토큰은 옛 이름 기준)",
     }
+
+
+@app.get("/api/admin/rename-suspects")
+def rename_suspects_list(admin: dict = Depends(require_admin)):
+    """크롤 diff가 감지한 닉변 의심 목록 (pending만)"""
+    try:
+        res = supabase.table("rename_suspects").select("*").eq("status", "pending").order("id", desc=True).execute()
+        return res.data or []
+    except Exception as e:
+        print(f"[rename-suspects] {repr(e)[:80]}")
+        return []
+
+
+@app.post("/api/admin/rename-suspects/{sid}/confirm")
+def rename_suspect_confirm(sid: int, admin: dict = Depends(require_admin)):
+    res = supabase.table("rename_suspects").select("*").eq("id", sid).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="의심 건을 찾을 수 없어요")
+    s = res.data[0]
+    changed = _do_rename(_nfc(s["old_name"]), _nfc(s["new_name"]))
+    supabase.table("rename_suspects").update({"status": "confirmed"}).eq("id", sid).execute()
+    return {"status": "ok", "changed": changed}
+
+
+@app.post("/api/admin/rename-suspects/{sid}/dismiss")
+def rename_suspect_dismiss(sid: int, admin: dict = Depends(require_admin)):
+    supabase.table("rename_suspects").update({"status": "dismissed"}).eq("id", sid).execute()
+    return {"status": "ok"}
+
+
+@app.get("/api/change-log")
+def get_change_log(name: str, limit: int = 30):
+    """캐릭터 변경 이력 (길드/직업/닉변) — 전적검색 페이지용, 공개"""
+    n = _nfc(name)
+    if not n:
+        return []
+    try:
+        res = (supabase.table("change_log").select("field,old_value,new_value,changed_at")
+               .eq("name", n).order("changed_at", desc=True).limit(max(1, min(limit, 100))).execute())
+        return [{
+            "field": r["field"], "oldValue": r.get("old_value"),
+            "newValue": r.get("new_value"), "changedAt": r.get("changed_at"),
+        } for r in (res.data or [])]
+    except Exception as e:
+        print(f"[change-log] {repr(e)[:80]}")
+        return []
 
 
 # ── 매크로 인증 / 다운로드 API ───────────────────────────────
