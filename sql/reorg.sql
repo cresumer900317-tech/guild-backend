@@ -7,9 +7,15 @@ create table if not exists reorg_board (
   character_name text not null unique,            -- NFC 정규화해 저장
   assigned_guild text,                            -- 친구들|친구둘|친구삼|친구넷|친구닷, null=미배치
   moved          boolean not null default false,  -- 인게임 이동 완료 여부
+  boss_score     bigint,                          -- 토벌전 점수 수동값 (null이면 크롤값 사용)
+  versus_score   bigint,                          -- 대항전 점수 (수동 입력)
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now()
 );
+
+-- 기존 테이블에 추가 적용용 (신규 생성이면 no-op)
+alter table reorg_board add column if not exists boss_score bigint;
+alter table reorg_board add column if not exists versus_score bigint;
 
 -- 백엔드(service key)만 접근 — RLS 켜고 정책 없음
 alter table reorg_board enable row level security;

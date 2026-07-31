@@ -1707,6 +1707,8 @@ class ReorgPatchRequest(BaseModel):
     assigned_guild: Optional[str] = None   # REORG_GUILDS 중 하나
     clear_guild: bool = False              # true면 미배치로 (moved도 리셋)
     moved: Optional[bool] = None
+    boss_score: Optional[int] = None       # 토벌전 수동값 (null 보내면 삭제→크롤값 사용)
+    versus_score: Optional[int] = None     # 대항전 점수
 
 
 def _reorg_table_guard(e: Exception):
@@ -1755,6 +1757,11 @@ def reorg_patch(rid: int, req: ReorgPatchRequest, admin: dict = Depends(require_
         upd["assigned_guild"] = req.assigned_guild
     if req.moved is not None:
         upd["moved"] = req.moved
+    sent = req.model_fields_set   # 명시적 null(삭제)과 미전송 구분
+    if "boss_score" in sent:
+        upd["boss_score"] = req.boss_score
+    if "versus_score" in sent:
+        upd["versus_score"] = req.versus_score
     if not upd:
         raise HTTPException(status_code=400, detail="변경 내용이 없습니다")
     upd["updated_at"] = datetime.now().isoformat()
