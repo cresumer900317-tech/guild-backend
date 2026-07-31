@@ -1781,6 +1781,65 @@ def reorg_delete(rid: int, admin: dict = Depends(require_admin)):
         _reorg_table_guard(e)
 
 
+# ── 닉네임 변경 처리 (운영진 전용) ────────────────────────────
+# 게임 내 닉변 시 이름 키로 저장된 모든 데이터를 새 이름으로 이관.
+# members/server_ranking은 크롤이 전량 교체하므로 제외. 없는 테이블/컬럼은 건너뜀.
+
+RENAME_TARGETS = [
+    ("users", "character_name"),
+    ("monthly_snapshots", "name"),
+    ("server_ranking_history", "name"),
+    ("reorg_board", "character_name"),
+    ("user_points", "character_name"),
+    ("point_log", "character_name"),
+    ("push_tokens", "character_name"),
+    ("visitors", "character_name"),
+    ("post_likes", "character_name"),
+    ("free_posts", "author"),
+    ("free_comments", "author"),
+    ("tips", "author"),
+    ("tip_comments", "author"),
+    ("notices", "author"),
+    ("macro_comments", "author"),
+    ("rival_picks", "owner"),
+    ("rival_picks", "rival"),
+    ("blocks", "blocker"),
+    ("blocks", "blocked"),
+    ("reports", "reporter"),
+]
+
+
+class RenameRequest(BaseModel):
+    old_name: str
+    new_name: str
+
+
+@app.post("/api/admin/rename")
+def admin_rename(req: RenameRequest, admin: dict = Depends(require_admin)):
+    old, new = _nfc(req.old_name), _nfc(req.new_name)
+    if not old or not new or old == new:
+        raise HTTPException(status_code=400, detail="이전/새 이름을 확인해주세요")
+    dup = supabase.table("users").select("id").eq("character_name", new).execute()
+    if dup.data:
+        raise HTTPException(status_code=409, detail=f"'{new}' 이름의 계정이 이미 있어요")
+    exists = supabase.table("users").select("id").eq("character_name", old).execute()
+    changed = {}
+    for t, col in RENAME_TARGETS:
+        try:
+            res = supabase.table(t).update({col: new}).eq(col, old).execute()
+            n = len(res.data or [])
+            if n:
+                changed[f"{t}.{col}"] = n
+        except Exception as e:
+            print(f"[rename] {t}.{col} 건너뜀: {repr(e)[:80]}")
+    cache_clear("monthly", "home_summary", "weekly_growth")   # 이름 박힌 응답 캐시 갱신
+    return {
+        "status": "ok", "old": old, "new": new, "changed": changed,
+        "had_account": bool(exists.data),
+        "note": "계정이 있던 유저는 새 이름으로 재로그인해야 해요 (기존 토큰은 옛 이름 기준)",
+    }
+
+
 # ── 매크로 인증 / 다운로드 API ───────────────────────────────
 
 MACRO_DIR = os.path.join(os.path.dirname(__file__), "macro_files")
