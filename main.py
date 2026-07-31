@@ -1876,6 +1876,39 @@ def del_home_video(vid: int, admin: dict = Depends(require_admin)):
     return {"status": "ok"}
 
 
+# ── 메키 공식 공지 프록시 (넥슨 커뮤니티 API, 30분 캐시) ──────
+
+@app.get("/api/official-notices")
+def get_official_notices():
+    """메이플키우기 공식 공지(6633)·패치노트(6698) 최신 목록 — 홈 사이드 카드용"""
+    cached = cache_get("official_notices", 1800)
+    if cached is not None:
+        return cached
+    import httpx as _httpx
+    base = ("https://forum.nexon.com/api/v1/board/{}/threads?alias=maplestoryidle-kr"
+            "&pageNo=1&blockStartKey=&blockStartNo=&paginationType=PAGING&pageSize={}"
+            "&blockSize=10&hideType=WEB&headlineId=&searchKeywordType=THREAD_TITLE_AND_CONTENT&keywords=")
+    out = []
+    try:
+        for board_id, kind, size in (("6633", "공지", 4), ("6698", "패치", 3)):
+            r = _httpx.get(base.format(board_id, size),
+                           headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            for t in (r.json().get("threads") or []):
+                ts = int(t.get("createDate") or 0)
+                out.append({
+                    "kind": kind,
+                    "title": t.get("title"),
+                    "date": datetime.fromtimestamp(ts, _KST).strftime("%Y-%m-%d") if ts else None,
+                    "url": f"https://forum.nexon.com/maplestoryidle-kr/board_view?board={board_id}&thread={t.get('threadId')}",
+                })
+        out.sort(key=lambda x: x.get("date") or "", reverse=True)
+        return cache_set("official_notices", out[:6])
+    except Exception as e:
+        print(f"[official-notices] {repr(e)[:80]}")
+        stale = cache_get("official_notices", 86400)   # 넥슨 API 실패 시 하루까지 이전 값 유지
+        return stale if stale is not None else []
+
+
 # ── 닉네임 변경 처리 (운영진 전용) ────────────────────────────
 # 게임 내 닉변 시 이름 키로 저장된 모든 데이터를 새 이름으로 이관.
 # members/server_ranking은 크롤이 전량 교체하므로 제외. 없는 테이블/컬럼은 건너뜀.
