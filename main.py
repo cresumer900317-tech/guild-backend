@@ -869,45 +869,41 @@ def get_guild_dashboard():
         print(f"[guild-dashboard] {e}")
         rows = []
 
-    by_date = defaultdict(int)        # 날짜 → 친구패밀리 전투력 합
     member_days = defaultdict(dict)   # 이름 → {날짜: 전투력}
     for r in rows:
         d = r.get("snapshot_date"); nm = r.get("name")
         if not d or not nm:
             continue
-        p = int(r.get("power") or 0)
-        by_date[d] += p
-        member_days[nm][d] = p
+        member_days[nm][d] = int(r.get("power") or 0)
 
-    dates = sorted(by_date.keys())[-7:]
-    series = [{"date": d, "total": by_date[d]} for d in dates]
+    dates = sorted({d for dm in member_days.values() for d in dm})[-7:]
+    result = {"series": [], "growthPct": 0.0, "growersYesterday": 0,
+              "totalMembers": 0, "growersWeek": 0, "days": len(dates)}
 
-    growth_pct = 0.0
-    if len(series) >= 2 and series[0]["total"] > 0:
-        growth_pct = round((series[-1]["total"] - series[0]["total"]) / series[0]["total"] * 100, 2)
+    if len(dates) >= 2:
+        first, last = dates[0], dates[-1]
+        # 로스터 안정화: 신규 가입자 합계 부풀림 방지 — 첫날·마지막날 모두 존재하는 멤버만으로 성장 계산.
+        roster = [nm for nm, dm in member_days.items() if last in dm]         # 현재 추적 멤버
+        common = [nm for nm in roster if first in member_days[nm]]            # 첫날·마지막날 모두 존재
+        series = [{"date": d, "total": sum(member_days[nm][d] for nm in common if d in member_days[nm])}
+                  for d in dates]
+        prev_sum = sum(member_days[nm][first] for nm in common)
+        cur_sum = sum(member_days[nm][last] for nm in common)
+        growth_pct = round((cur_sum - prev_sum) / prev_sum * 100, 2) if prev_sum > 0 else 0.0
+        growers_week = sum(1 for nm in common if member_days[nm][last] > member_days[nm][first])
+        prev_day = dates[-2]
+        growers_yday = sum(1 for nm in roster
+                           if prev_day in member_days[nm] and member_days[nm][last] > member_days[nm][prev_day])
+        result = {
+            "series": series,
+            "growthPct": growth_pct,
+            "growersYesterday": growers_yday,
+            "growersWeek": growers_week,
+            "totalMembers": len(roster),
+            "days": len(dates),
+        }
 
-    growers = total_members = streak = 0
-    if dates:
-        latest = dates[-1]
-        total_members = sum(1 for dm in member_days.values() if latest in dm)
-        if len(dates) >= 2:
-            prev = dates[-2]
-            for dm in member_days.values():
-                if latest in dm and prev in dm and dm[latest] > dm[prev]:
-                    growers += 1
-            for dm in member_days.values():
-                seq = [dm[d] for d in dates if d in dm]
-                if len(seq) == len(dates) and len(seq) >= 2 and all(seq[i] > seq[i - 1] for i in range(1, len(seq))):
-                    streak += 1
-
-    return cache_set("guild_dashboard", {
-        "series": series,
-        "growthPct": growth_pct,
-        "growersYesterday": growers,
-        "totalMembers": total_members,
-        "streak7d": streak,
-        "days": len(dates),
-    })
+    return cache_set("guild_dashboard", result)
 
 
 @app.get("/api/server-ranking")
