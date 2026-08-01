@@ -844,6 +844,72 @@ def get_server_stats():
     return cache_set("server_stats", {"totalPlayers": cnt})
 
 
+# 친구패밀리 운영 길드 (대시보드 집계 대상)
+FRIEND_GUILD_NAMES = ["친구들", "친구둘", "친구삼", "친구넷", "친구닷"]
+
+
+@app.get("/api/guild-dashboard")
+def get_guild_dashboard():
+    """친구패밀리 대시보드(홈 히어로/KPI/7일 차트)용 통계.
+    server_ranking_history(일별 스냅샷)에서 친구 길드 멤버를 집계 — 신규 테이블 불필요.
+    반환: 7일 전투력합 시계열, 이번 주 성장률, 어제 성장 인원, 추적 인원, 7일 연속 성장 인원."""
+    cached = cache_get("guild_dashboard", 3600)
+    if cached is not None:
+        return cached
+    from collections import defaultdict
+    try:
+        today = datetime.now(KST).date()
+        cutoff = (today - timedelta(days=8)).isoformat()
+        rows = (supabase.table("server_ranking_history")
+                .select("snapshot_date,name,power,guild")
+                .in_("guild", FRIEND_GUILD_NAMES)
+                .gte("snapshot_date", cutoff)
+                .execute().data) or []
+    except Exception as e:
+        print(f"[guild-dashboard] {e}")
+        rows = []
+
+    by_date = defaultdict(int)        # 날짜 → 친구패밀리 전투력 합
+    member_days = defaultdict(dict)   # 이름 → {날짜: 전투력}
+    for r in rows:
+        d = r.get("snapshot_date"); nm = r.get("name")
+        if not d or not nm:
+            continue
+        p = int(r.get("power") or 0)
+        by_date[d] += p
+        member_days[nm][d] = p
+
+    dates = sorted(by_date.keys())[-7:]
+    series = [{"date": d, "total": by_date[d]} for d in dates]
+
+    growth_pct = 0.0
+    if len(series) >= 2 and series[0]["total"] > 0:
+        growth_pct = round((series[-1]["total"] - series[0]["total"]) / series[0]["total"] * 100, 2)
+
+    growers = total_members = streak = 0
+    if dates:
+        latest = dates[-1]
+        total_members = sum(1 for dm in member_days.values() if latest in dm)
+        if len(dates) >= 2:
+            prev = dates[-2]
+            for dm in member_days.values():
+                if latest in dm and prev in dm and dm[latest] > dm[prev]:
+                    growers += 1
+            for dm in member_days.values():
+                seq = [dm[d] for d in dates if d in dm]
+                if len(seq) == len(dates) and len(seq) >= 2 and all(seq[i] > seq[i - 1] for i in range(1, len(seq))):
+                    streak += 1
+
+    return cache_set("guild_dashboard", {
+        "series": series,
+        "growthPct": growth_pct,
+        "growersYesterday": growers,
+        "totalMembers": total_members,
+        "streak7d": streak,
+        "days": len(dates),
+    })
+
+
 @app.get("/api/server-ranking")
 def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
