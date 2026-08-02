@@ -909,8 +909,13 @@ def get_guild_dashboard():
 # ── 컨텐츠 기록 (홈 '컨텐츠 기록' 섹션) ────────────────────────
 # contents(메타) 참조. 운영진이 어드민에서 회차별 점수 입력. 테이블: sql/content_records.sql
 
+# 컨텐츠에 적극 참여하는 길드 (탭 순서). 나머지 길드는 컨텐츠 관리 대상 아님.
+CONTENT_GUILDS = ["친구들", "친구둘"]
+
+
 class ContentRecordIn(BaseModel):
     content_id: str = Field(alias="contentId")
+    guild: Optional[str] = None
     round_label: Optional[str] = Field(default=None, alias="roundLabel")
     score: int = 0
     participants: Optional[int] = None
@@ -944,49 +949,59 @@ def _content_card(c, rows):
     }
 
 
+def _pending_card(c):
+    return {
+        "contentId": c["id"], "name": c["name"], "icon": c.get("icon"), "type": c.get("type"),
+        "score": None, "roundLabel": None, "participants": None, "goal": None,
+        "recordedDate": None, "best": None, "prevScore": None, "history": [],
+        "count": 0, "pending": True, "startsAt": None, "endsAt": None,
+    }
+
+
 @app.get("/api/content-records")
 def get_content_records():
-    """홈 컨텐츠 기록 — 고정 컨텐츠(대항전·토벌전) + 현재 진행 시즌 1개.
-    반환: {fixed: [...], season: {...}|null, prevSeason: 지난시즌명|null}."""
+    """홈 컨텐츠 기록 — 길드별(친구들·친구둘) 고정(대항전·토벌전) + 현재 시즌 1개.
+    반환: {guilds: [{guild, fixed:[...], season:{...}|null}], prevSeason: 지난시즌명|null}."""
     cached = cache_get("content_records", 300)
     if cached is not None:
         return cached
-    empty = {"fixed": [], "season": None, "prevSeason": None}
+    import unicodedata
+
+    def nfc(s):
+        return unicodedata.normalize("NFC", str(s or "")).strip()
+
+    empty = {"guilds": [{"guild": g, "fixed": [], "season": None} for g in CONTENT_GUILDS], "prevSeason": None}
     try:
         contents = (supabase.table("contents").select("*").eq("active", True)
                     .order("sort_order").execute().data) or []
         recs = (supabase.table("content_records").select("*")
                 .order("recorded_date", desc=True).order("id", desc=True)
-                .limit(400).execute().data) or []
+                .limit(600).execute().data) or []
         past = (supabase.table("contents").select("name")
                 .eq("type", "season").eq("is_current", False)
                 .order("ends_at", desc=True).limit(1).execute().data) or []
     except Exception as e:
         print(f"[content-records] {e}")
         return cache_set("content_records", empty)
-    by_content = {}
+
+    by_gc = {}   # (guild, content_id) → rows
     for r in recs:
-        by_content.setdefault(r["content_id"], []).append(r)
-    fixed, season = [], None
-    for c in contents:
-        rows = by_content.get(c["id"], [])
-        if c.get("type") == "season":
-            # 시즌은 '현재 시즌'으로 지정 + 기록 있을 때만
-            if c.get("is_current") and rows:
-                season = _content_card(c, rows)
-        else:
-            # 고정 컨텐츠(대항전·토벌전)는 기록 없어도 '대기중' 카드로 항상 표시
-            if rows:
-                fixed.append(_content_card(c, rows))
+        by_gc.setdefault((nfc(r.get("guild")), r["content_id"]), []).append(r)
+
+    guilds_out = []
+    for g in CONTENT_GUILDS:
+        fixed, season = [], None
+        for c in contents:
+            rows = by_gc.get((nfc(g), c["id"]), [])
+            if c.get("type") == "season":
+                if c.get("is_current") and rows:
+                    season = _content_card(c, rows)
             else:
-                fixed.append({
-                    "contentId": c["id"], "name": c["name"], "icon": c.get("icon"), "type": c.get("type"),
-                    "score": None, "roundLabel": None, "participants": None, "goal": None,
-                    "recordedDate": None, "best": None, "prevScore": None, "history": [],
-                    "count": 0, "pending": True, "startsAt": None, "endsAt": None,
-                })
+                fixed.append(_content_card(c, rows) if rows else _pending_card(c))
+        guilds_out.append({"guild": g, "fixed": fixed, "season": season})
+
     return cache_set("content_records", {
-        "fixed": fixed, "season": season,
+        "guilds": guilds_out,
         "prevSeason": (past[0]["name"] if past else None),
     })
 
@@ -1060,8 +1075,8 @@ def admin_list_content_records(admin: dict = Depends(require_admin)):
 @app.post("/api/admin/content-records")
 def admin_add_content_record(req: ContentRecordIn, admin: dict = Depends(require_admin)):
     """회차 점수 기록 추가."""
-    row = {"content_id": req.content_id, "round_label": req.round_label, "score": req.score,
-           "participants": req.participants, "goal": req.goal, "note": req.note}
+    row = {"content_id": req.content_id, "guild": req.guild, "round_label": req.round_label,
+           "score": req.score, "participants": req.participants, "goal": req.goal, "note": req.note}
     if req.recorded_date:
         row["recorded_date"] = req.recorded_date
     try:

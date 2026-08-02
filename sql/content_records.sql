@@ -16,6 +16,10 @@ create table if not exists content_records (
 );
 create index if not exists idx_content_records on content_records(content_id, recorded_date desc, id desc);
 
+-- 컨텐츠 참여 길드 구분(친구들·친구둘) — 길드별로 점수 따로 기록
+alter table content_records add column if not exists guild text;
+create index if not exists idx_content_records_guild on content_records(guild, content_id, recorded_date desc);
+
 -- contents(메타)에 시즌 진행 정보 추가 — 시즌은 한 번에 하나만 is_current=true
 alter table contents add column if not exists is_current boolean not null default false;
 alter table contents add column if not exists starts_at  date;   -- 시즌 시작일(주차·진행바 계산)
