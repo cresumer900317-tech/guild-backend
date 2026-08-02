@@ -970,13 +970,21 @@ def get_content_records():
     fixed, season = [], None
     for c in contents:
         rows = by_content.get(c["id"], [])
-        if not rows:
-            continue
         if c.get("type") == "season":
-            if c.get("is_current"):
+            # 시즌은 '현재 시즌'으로 지정 + 기록 있을 때만
+            if c.get("is_current") and rows:
                 season = _content_card(c, rows)
         else:
-            fixed.append(_content_card(c, rows))
+            # 고정 컨텐츠(대항전·토벌전)는 기록 없어도 '대기중' 카드로 항상 표시
+            if rows:
+                fixed.append(_content_card(c, rows))
+            else:
+                fixed.append({
+                    "contentId": c["id"], "name": c["name"], "icon": c.get("icon"), "type": c.get("type"),
+                    "score": None, "roundLabel": None, "participants": None, "goal": None,
+                    "recordedDate": None, "best": None, "prevScore": None, "history": [],
+                    "count": 0, "pending": True, "startsAt": None, "endsAt": None,
+                })
     return cache_set("content_records", {
         "fixed": fixed, "season": season,
         "prevSeason": (past[0]["name"] if past else None),
