@@ -906,6 +906,111 @@ def get_guild_dashboard():
     return cache_set("guild_dashboard", result)
 
 
+# ── 컨텐츠 기록 (홈 '컨텐츠 기록' 섹션) ────────────────────────
+# contents(메타) 참조. 운영진이 어드민에서 회차별 점수 입력. 테이블: sql/content_records.sql
+
+class ContentRecordIn(BaseModel):
+    content_id: str = Field(alias="contentId")
+    round_label: Optional[str] = Field(default=None, alias="roundLabel")
+    score: int = 0
+    participants: Optional[int] = None
+    goal: Optional[int] = None
+    recorded_date: Optional[str] = Field(default=None, alias="recordedDate")
+    note: Optional[str] = None
+    model_config = {"populate_by_name": True}
+
+
+class ContentIn(BaseModel):
+    id: str
+    name: str
+    icon: Optional[str] = "🏆"
+    type: str = "season"
+    sort_order: Optional[int] = Field(default=10, alias="sortOrder")
+    model_config = {"populate_by_name": True}
+
+
+@app.get("/api/content-records")
+def get_content_records():
+    """홈 컨텐츠 기록 — 활성 컨텐츠별 최근 회차 점수·추이(막대)·최고·이전 회차."""
+    cached = cache_get("content_records", 300)
+    if cached is not None:
+        return cached
+    try:
+        contents = (supabase.table("contents").select("*").eq("active", True)
+                    .order("sort_order").execute().data) or []
+        recs = (supabase.table("content_records").select("*")
+                .order("recorded_date", desc=True).order("id", desc=True)
+                .limit(400).execute().data) or []
+    except Exception as e:
+        print(f"[content-records] {e}")
+        return cache_set("content_records", [])
+    by_content = {}
+    for r in recs:
+        by_content.setdefault(r["content_id"], []).append(r)
+    out = []
+    for c in contents:
+        rows = by_content.get(c["id"], [])
+        if not rows:
+            continue
+        latest = rows[0]
+        history = [int(x.get("score") or 0) for x in reversed(rows[:8])]  # 오래된→최신 (막대용)
+        best = max((int(x.get("score") or 0) for x in rows), default=0)
+        prev = int(rows[1].get("score") or 0) if len(rows) > 1 else None
+        out.append({
+            "contentId": c["id"], "name": c["name"], "icon": c.get("icon"), "type": c.get("type"),
+            "score": int(latest.get("score") or 0), "roundLabel": latest.get("round_label"),
+            "participants": latest.get("participants"), "goal": latest.get("goal"),
+            "recordedDate": latest.get("recorded_date"), "best": best,
+            "prevScore": prev, "history": history, "count": len(rows),
+        })
+    return cache_set("content_records", out)
+
+
+@app.get("/api/admin/content-records")
+def admin_list_content_records(admin: dict = Depends(require_admin)):
+    """운영진 관리용 — 최근 기록 100건."""
+    try:
+        return (supabase.table("content_records").select("*")
+                .order("recorded_date", desc=True).order("id", desc=True)
+                .limit(100).execute().data) or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="content_records 테이블이 없어요 — sql/content_records.sql을 Supabase에서 실행해주세요")
+
+
+@app.post("/api/admin/content-records")
+def admin_add_content_record(req: ContentRecordIn, admin: dict = Depends(require_admin)):
+    """회차 점수 기록 추가."""
+    row = {"content_id": req.content_id, "round_label": req.round_label, "score": req.score,
+           "participants": req.participants, "goal": req.goal, "note": req.note}
+    if req.recorded_date:
+        row["recorded_date"] = req.recorded_date
+    try:
+        res = supabase.table("content_records").insert(row).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"기록 저장 실패: {repr(e)[:120]}")
+    cache_clear("content_records")
+    return {"status": "ok", "row": (res.data or [None])[0]}
+
+
+@app.delete("/api/admin/content-records/{rid}")
+def admin_del_content_record(rid: int, admin: dict = Depends(require_admin)):
+    supabase.table("content_records").delete().eq("id", rid).execute()
+    cache_clear("content_records")
+    return {"status": "ok"}
+
+
+@app.post("/api/admin/contents")
+def admin_upsert_content(req: ContentIn, admin: dict = Depends(require_admin)):
+    """컨텐츠 메타 추가/수정 — 시즌 컨텐츠(월드 아레나 등) 운영진 추가용."""
+    if req.type not in ("always", "season"):
+        raise HTTPException(status_code=400, detail="type은 always 또는 season이어야 합니다")
+    supabase.table("contents").upsert({
+        "id": req.id, "name": req.name, "icon": req.icon or "🏆",
+        "type": req.type, "sort_order": req.sort_order or 10, "active": True,
+    }).execute()
+    return {"status": "ok"}
+
+
 @app.get("/api/server-ranking")
 def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
