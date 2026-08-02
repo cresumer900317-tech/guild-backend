@@ -929,41 +929,113 @@ class ContentIn(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+def _content_card(c, rows):
+    latest = rows[0]
+    history = [int(x.get("score") or 0) for x in reversed(rows[:8])]  # 오래된→최신 (막대용)
+    best = max((int(x.get("score") or 0) for x in rows), default=0)
+    prev = int(rows[1].get("score") or 0) if len(rows) > 1 else None
+    return {
+        "contentId": c["id"], "name": c["name"], "icon": c.get("icon"), "type": c.get("type"),
+        "score": int(latest.get("score") or 0), "roundLabel": latest.get("round_label"),
+        "participants": latest.get("participants"), "goal": latest.get("goal"),
+        "recordedDate": latest.get("recorded_date"), "best": best,
+        "prevScore": prev, "history": history, "count": len(rows),
+        "startsAt": c.get("starts_at"), "endsAt": c.get("ends_at"),
+    }
+
+
 @app.get("/api/content-records")
 def get_content_records():
-    """홈 컨텐츠 기록 — 활성 컨텐츠별 최근 회차 점수·추이(막대)·최고·이전 회차."""
+    """홈 컨텐츠 기록 — 고정 컨텐츠(대항전·토벌전) + 현재 진행 시즌 1개.
+    반환: {fixed: [...], season: {...}|null, prevSeason: 지난시즌명|null}."""
     cached = cache_get("content_records", 300)
     if cached is not None:
         return cached
+    empty = {"fixed": [], "season": None, "prevSeason": None}
     try:
         contents = (supabase.table("contents").select("*").eq("active", True)
                     .order("sort_order").execute().data) or []
         recs = (supabase.table("content_records").select("*")
                 .order("recorded_date", desc=True).order("id", desc=True)
                 .limit(400).execute().data) or []
+        past = (supabase.table("contents").select("name")
+                .eq("type", "season").eq("is_current", False)
+                .order("ends_at", desc=True).limit(1).execute().data) or []
     except Exception as e:
         print(f"[content-records] {e}")
-        return cache_set("content_records", [])
+        return cache_set("content_records", empty)
     by_content = {}
     for r in recs:
         by_content.setdefault(r["content_id"], []).append(r)
-    out = []
+    fixed, season = [], None
     for c in contents:
         rows = by_content.get(c["id"], [])
         if not rows:
             continue
-        latest = rows[0]
-        history = [int(x.get("score") or 0) for x in reversed(rows[:8])]  # 오래된→최신 (막대용)
-        best = max((int(x.get("score") or 0) for x in rows), default=0)
-        prev = int(rows[1].get("score") or 0) if len(rows) > 1 else None
+        if c.get("type") == "season":
+            if c.get("is_current"):
+                season = _content_card(c, rows)
+        else:
+            fixed.append(_content_card(c, rows))
+    return cache_set("content_records", {
+        "fixed": fixed, "season": season,
+        "prevSeason": (past[0]["name"] if past else None),
+    })
+
+
+@app.get("/api/content-archive")
+def get_content_archive():
+    """지난 시즌 아카이브 — 현재 시즌 제외한 과거 시즌들의 최종 기록."""
+    try:
+        seasons = (supabase.table("contents").select("*")
+                   .eq("type", "season").order("ends_at", desc=True).execute().data) or []
+        recs = (supabase.table("content_records").select("*")
+                .order("recorded_date", desc=True).order("id", desc=True).execute().data) or []
+    except Exception as e:
+        print(f"[content-archive] {e}")
+        return []
+    by_content = {}
+    for r in recs:
+        by_content.setdefault(r["content_id"], []).append(r)
+    out = []
+    for c in seasons:
+        if c.get("is_current"):
+            continue
+        rows = by_content.get(c["id"], [])
+        if not rows:
+            continue
         out.append({
-            "contentId": c["id"], "name": c["name"], "icon": c.get("icon"), "type": c.get("type"),
-            "score": int(latest.get("score") or 0), "roundLabel": latest.get("round_label"),
-            "participants": latest.get("participants"), "goal": latest.get("goal"),
-            "recordedDate": latest.get("recorded_date"), "best": best,
-            "prevScore": prev, "history": history, "count": len(rows),
+            "contentId": c["id"], "name": c["name"], "icon": c.get("icon"),
+            "startsAt": c.get("starts_at"), "endsAt": c.get("ends_at"),
+            "finalScore": int(rows[0].get("score") or 0), "roundLabel": rows[0].get("round_label"),
+            "best": max((int(x.get("score") or 0) for x in rows), default=0),
+            "count": len(rows), "participants": rows[0].get("participants"),
         })
-    return cache_set("content_records", out)
+    return out
+
+
+class SeasonCurrentIn(BaseModel):
+    content_id: str = Field(alias="contentId")
+    starts_at: Optional[str] = Field(default=None, alias="startsAt")
+    ends_at: Optional[str] = Field(default=None, alias="endsAt")
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/api/admin/season-current")
+def admin_set_current_season(req: SeasonCurrentIn, admin: dict = Depends(require_admin)):
+    """지정 시즌을 '현재 시즌'으로 설정. 나머지 시즌은 현재 해제(→ 아카이브)."""
+    try:
+        supabase.table("contents").update({"is_current": False}).eq("type", "season").execute()
+        upd = {"is_current": True, "active": True}
+        if req.starts_at:
+            upd["starts_at"] = req.starts_at
+        if req.ends_at:
+            upd["ends_at"] = req.ends_at
+        supabase.table("contents").update(upd).eq("id", req.content_id).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"시즌 설정 실패: {repr(e)[:120]}")
+    cache_clear("content_records")
+    return {"status": "ok"}
 
 
 @app.get("/api/admin/content-records")
