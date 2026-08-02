@@ -850,16 +850,17 @@ FRIEND_GUILD_NAMES = ["친구들", "친구둘", "친구삼", "친구넷", "친�
 
 @app.get("/api/guild-dashboard")
 def get_guild_dashboard():
-    """친구패밀리 대시보드(홈 히어로/KPI/7일 차트)용 통계.
-    server_ranking_history(일별 스냅샷)에서 친구 길드 멤버를 집계 — 신규 테이블 불필요.
-    반환: 7일 전투력합 시계열, 이번 주 성장률, 어제 성장 인원, 추적 인원, 7일 연속 성장 인원."""
+    """친구패밀리 대시보드(홈 히어로/KPI/차트)용 통계 — 월별 성장 단위.
+    server_ranking_history(일별 스냅샷)에서 친구 길드 멤버를 집계.
+    반환: 이번 달 일별 전투력합 시계열·이번 달 성장률·어제 성장 인원·추적 인원·이번 달 성장 인원·월(N월)."""
     cached = cache_get("guild_dashboard", 3600)
     if cached is not None:
         return cached
     from collections import defaultdict
     try:
         today = datetime.now(KST).date()
-        cutoff = (today - timedelta(days=8)).isoformat()
+        month_start = today.replace(day=1)
+        cutoff = min(month_start, today - timedelta(days=8)).isoformat()  # 이번 달 + 어제(월초 대비) 커버
         rows = (supabase.table("server_ranking_history")
                 .select("snapshot_date,name,power,guild")
                 .in_("guild", FRIEND_GUILD_NAMES)
@@ -868,6 +869,8 @@ def get_guild_dashboard():
     except Exception as e:
         print(f"[guild-dashboard] {e}")
         rows = []
+        today = datetime.now(KST).date()
+        month_start = today.replace(day=1)
 
     member_days = defaultdict(dict)   # 이름 → {날짜: 전투력}
     for r in rows:
@@ -876,32 +879,34 @@ def get_guild_dashboard():
             continue
         member_days[nm][d] = int(r.get("power") or 0)
 
-    dates = sorted({d for dm in member_days.values() for d in dm})[-7:]
+    all_dates = sorted({d for dm in member_days.values() for d in dm})
     result = {"series": [], "growthPct": 0.0, "growersYesterday": 0,
-              "totalMembers": 0, "growersWeek": 0, "days": len(dates)}
+              "totalMembers": 0, "growersMonth": 0, "monthLabel": f"{today.month}월",
+              "days": 0}
 
-    if len(dates) >= 2:
-        first, last = dates[0], dates[-1]
-        # 로스터 안정화: 신규 가입자 합계 부풀림 방지 — 첫날·마지막날 모두 존재하는 멤버만으로 성장 계산.
-        roster = [nm for nm, dm in member_days.items() if last in dm]         # 현재 추적 멤버
-        common = [nm for nm in roster if first in member_days[nm]]            # 첫날·마지막날 모두 존재
-        series = [{"date": d, "total": sum(member_days[nm][d] for nm in common if d in member_days[nm])}
-                  for d in dates]
-        prev_sum = sum(member_days[nm][first] for nm in common)
-        cur_sum = sum(member_days[nm][last] for nm in common)
-        growth_pct = round((cur_sum - prev_sum) / prev_sum * 100, 2) if prev_sum > 0 else 0.0
-        growers_week = sum(1 for nm in common if member_days[nm][last] > member_days[nm][first])
-        prev_day = dates[-2]
-        growers_yday = sum(1 for nm in roster
-                           if prev_day in member_days[nm] and member_days[nm][last] > member_days[nm][prev_day])
-        result = {
-            "series": series,
-            "growthPct": growth_pct,
-            "growersYesterday": growers_yday,
-            "growersWeek": growers_week,
-            "totalMembers": len(roster),
-            "days": len(dates),
-        }
+    if len(all_dates) >= 1:
+        latest = all_dates[-1]
+        roster = [nm for nm, dm in member_days.items() if latest in dm]   # 현재 추적 멤버
+        result["totalMembers"] = len(roster)
+        # 어제 성장 인원 (최근 2개 스냅샷)
+        if len(all_dates) >= 2:
+            prev_day = all_dates[-2]
+            result["growersYesterday"] = sum(
+                1 for nm in roster
+                if prev_day in member_days[nm] and member_days[nm][latest] > member_days[nm][prev_day])
+        # 이번 달 성장 (월초 스냅샷 대비, 로스터 안정화)
+        ms = month_start.isoformat()
+        month_dates = [d for d in all_dates if d >= ms]
+        if len(month_dates) >= 2:
+            first, last = month_dates[0], month_dates[-1]
+            common = [nm for nm, dm in member_days.items() if last in dm and first in dm]
+            prev_sum = sum(member_days[nm][first] for nm in common)
+            cur_sum = sum(member_days[nm][last] for nm in common)
+            result["growthPct"] = round((cur_sum - prev_sum) / prev_sum * 100, 2) if prev_sum > 0 else 0.0
+            result["growersMonth"] = sum(1 for nm in common if member_days[nm][last] > member_days[nm][first])
+            result["series"] = [{"date": d, "total": sum(member_days[nm][d] for nm in common if d in member_days[nm])}
+                                for d in month_dates]
+            result["days"] = len(month_dates)
 
     return cache_set("guild_dashboard", result)
 
