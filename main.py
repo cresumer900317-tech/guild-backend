@@ -857,6 +857,11 @@ def get_guild_dashboard():
     if cached is not None:
         return cached
     from collections import defaultdict
+    import unicodedata
+
+    def _nfc(s):
+        return unicodedata.normalize("NFC", str(s or "")).strip()
+
     try:
         today = datetime.now(KST).date()
         month_start = today.replace(day=1)
@@ -866,16 +871,24 @@ def get_guild_dashboard():
                 .in_("guild", FRIEND_GUILD_NAMES)
                 .gte("snapshot_date", cutoff)
                 .execute().data) or []
+        # 실제 길드원 명단(members 테이블) — 서버랭킹의 미등록·이탈·부캐 제외용
+        member_rows = (supabase.table("members").select("name,guild").execute().data) or []
     except Exception as e:
         print(f"[guild-dashboard] {e}")
         rows = []
+        member_rows = []
         today = datetime.now(KST).date()
         month_start = today.replace(day=1)
+
+    friend_set = {_nfc(g) for g in FRIEND_GUILD_NAMES}
+    roster_names = {_nfc(m.get("name")) for m in member_rows if _nfc(m.get("guild")) in friend_set}
 
     member_days = defaultdict(dict)   # 이름 → {날짜: 전투력}
     for r in rows:
         d = r.get("snapshot_date"); nm = r.get("name")
         if not d or not nm:
+            continue
+        if roster_names and _nfc(nm) not in roster_names:   # 공식 길드원만 집계
             continue
         member_days[nm][d] = int(r.get("power") or 0)
 
