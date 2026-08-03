@@ -235,18 +235,19 @@ def run_crawl():
         keep_map = {m["name"]: {c: m.get(c) for c in KEEP_COLS} for m in (existing.data or [])}
 
         # 새 데이터 insert 후 이전 행 삭제 — delete→insert 사이 API가 0명으로 응답하던 빈 창 제거.
-        # (id는 증가 시퀀스라 새 행의 최소 id 미만 = 이전 크롤 행)
+        # insert 반환 id에 의존하지 않는다(반환이 비면 이전 배치가 남아 전원 2배가 됨, 2026-08-03 장애).
+        # 이번 배치 captured_at 최솟값 미만 = 이전 크롤 행.
         if members:
             for m in members:
                 saved = keep_map.get(m.get("name")) or {}
                 for c in KEEP_COLS:  # 모든 행에 동일 키 보장(이전 값 복원 or None)
                     m[c] = saved.get(c)
-            res = supabase.table("members").insert(members).execute()
-            new_ids = [r["id"] for r in (res.data or []) if r.get("id") is not None]
-            if new_ids:
-                supabase.table("members").delete().lt("id", min(new_ids)).execute()
-            else:  # 반환 행에 id가 없으면(비정상) 기존 방식 폴백은 위험 — 로그만
-                logger.warning("[크롤링] insert 반환에 id 없음 — 이전 행 정리 건너뜀")
+            supabase.table("members").insert(members).execute()
+            batch_ts = [m["captured_at"] for m in members if m.get("captured_at")]
+            if batch_ts:
+                supabase.table("members").delete().lt("captured_at", min(batch_ts)).execute()
+            else:
+                logger.warning("[크롤링] captured_at 없음 — 이전 행 정리 건너뜀")
 
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
         _record_changes(existing.data, members)

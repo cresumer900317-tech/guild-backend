@@ -361,7 +361,18 @@ def fetch_members_raw(filters: str = "", order: str = "server_rank"):
         "apikey": sb_key,
         "Authorization": f"Bearer {sb_key}",
     }, timeout=15)
-    return resp.json()
+    data = resp.json()
+    # 크롤 배치 중복 방어 — 이전 배치 정리가 실패해도 같은 이름은 captured_at 최신 행만 반환
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        best = {}
+        for r in data:
+            k = r.get("name")
+            cur = best.get(k)
+            if cur is None or (r.get("captured_at") or "") > (cur.get("captured_at") or ""):
+                best[k] = r
+        if len(best) != len(data):
+            data = sorted(best.values(), key=lambda r: r.get("server_rank") or 10**9)
+    return data
 
 
 @app.get("/api/ranking")
