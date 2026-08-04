@@ -497,9 +497,12 @@ def get_growth_story():
     if totals:
         peak_date, peak_total = max(totals, key=lambda t: t[1])
 
+    # 연속 성장일 — 오늘은 수집 진행 중(합계가 하루 종일 차오름)이라 완료된 날까지만 센다
+    today_str = datetime.now(_KST).date().isoformat()
+    done = totals[:-1] if (totals and totals[-1][0] == today_str) else totals
     streak = 0
-    for i in range(len(totals) - 1, 0, -1):
-        if totals[i][1] > totals[i - 1][1]:
+    for i in range(len(done) - 1, 0, -1):
+        if done[i][1] > done[i - 1][1]:
             streak += 1
         else:
             break
