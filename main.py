@@ -464,13 +464,17 @@ def get_growth_story():
             break
         page += 1
 
-    by_date, name_day = {}, {}
+    # (이름,날짜)당 1행으로 dedup 후 합산 — 과거 중복 배치가 남아 있어도 합계가 2배가 되지 않게
+    name_day = {}
     for r in rows:
         d, p = r.get("snapshot_date"), int(r.get("power") or 0)
         if not d:
             continue
-        by_date[d] = by_date.get(d, 0) + p
         name_day.setdefault(_nfc(r.get("name")), {})[d] = p
+    by_date = {}
+    for dm in name_day.values():
+        for d, p in dm.items():
+            by_date[d] = by_date.get(d, 0) + p
     dates = sorted(by_date)
     last_date = dates[-1] if dates else None
     prev_date = dates[-2] if len(dates) >= 2 else None
