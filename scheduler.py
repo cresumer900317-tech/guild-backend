@@ -252,7 +252,7 @@ def run_crawl():
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
         _record_changes(existing.data, members)
         _detect_rename_suspects(existing.data, members)
-        _invalidate_cache("home_summary", "monthly", "weekly_growth")
+        _invalidate_cache("home_summary", "monthly", "weekly_growth", "growth_story")
         _warm_home_caches()
         _track_job("크롤링", ok=bool(members), detail="mgf.gg 멤버 크롤 결과가 비어있어요.")
         return members

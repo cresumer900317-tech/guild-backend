@@ -441,6 +441,88 @@ def update_pop_rank(admin: dict = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+@app.get("/api/growth-story")
+def get_growth_story():
+    """홈 '성장 라이브' — 오늘의 성장 피드·길드 합계 신기록·연속 성장일·경 단위 돌파·다음 목표.
+    server_ranking_history(일별 스냅샷)만으로 계산. 크롤 후 무효화 캐시."""
+    cached = cache_get("growth_story", 3900)
+    if cached is not None:
+        return cached
+    members = fetch_members_raw()
+    guilds = sorted({_nfc(m.get("guild")) for m in members if m.get("guild")})
+    since = (datetime.now(_KST).date() - timedelta(days=60)).isoformat()
+
+    rows, page = [], 0
+    while page <= 20:
+        res = (supabase.table("server_ranking_history")
+               .select("name,power,snapshot_date")
+               .in_("guild", guilds).gte("snapshot_date", since)
+               .range(page * 1000, page * 1000 + 999).execute())
+        batch = res.data or []
+        rows += batch
+        if len(batch) < 1000:
+            break
+        page += 1
+
+    by_date, name_day = {}, {}
+    for r in rows:
+        d, p = r.get("snapshot_date"), int(r.get("power") or 0)
+        if not d:
+            continue
+        by_date[d] = by_date.get(d, 0) + p
+        name_day.setdefault(_nfc(r.get("name")), {})[d] = p
+    dates = sorted(by_date)
+    last_date = dates[-1] if dates else None
+    prev_date = dates[-2] if len(dates) >= 2 else None
+
+    # 오늘의 성장 피드 — 마지막 스냅샷 vs 직전 스냅샷
+    gmap = {_nfc(m.get("name")): _nfc(m.get("guild")) for m in members}
+    feed = []
+    if last_date and prev_date:
+        for name, dm in name_day.items():
+            a, b = dm.get(last_date), dm.get(prev_date)
+            if a and b and a > b:
+                feed.append({"name": name, "guild": gmap.get(name),
+                             "diff": a - b, "pct": round((a / b - 1.0) * 100, 2)})
+        feed.sort(key=lambda x: -x["diff"])
+    grew_count = len(feed)
+    feed = feed[:12]
+
+    totals = [(d, by_date[d]) for d in dates]
+    peak_date, peak_total = (None, 0)
+    if totals:
+        peak_date, peak_total = max(totals, key=lambda t: t[1])
+
+    streak = 0
+    for i in range(len(totals) - 1, 0, -1):
+        if totals[i][1] > totals[i - 1][1]:
+            streak += 1
+        else:
+            break
+
+    GY10 = 10 * (10 ** 16)   # 10경 단위 돌파 이력
+    milestones, seen = [], set()
+    for d, t in totals:
+        floor10 = int(t // GY10) * 10
+        for m10 in range(10, floor10 + 1, 10):
+            if m10 not in seen:
+                seen.add(m10)
+                milestones.append({"gyeong": m10, "date": d})
+    milestones = milestones[-3:]
+
+    cur_total = totals[-1][1] if totals else 0
+    next_goal = (int(cur_total // GY10) + 1) * GY10
+    payload = {
+        "feed": feed, "feedDate": last_date, "prevDate": prev_date, "grewCount": grew_count,
+        "peak": {"total": peak_total, "date": peak_date, "isToday": bool(peak_date and peak_date == last_date)},
+        "streakDays": streak,
+        "milestones": milestones,
+        "goal": {"target": next_goal, "current": cur_total, "remaining": max(0, next_goal - cur_total)},
+        "days": len(totals),
+    }
+    return cache_set("growth_story", payload)
+
+
 @app.get("/api/weekly")
 def get_weekly():
     """주간 성장 랭킹 — server_ranking_history의 ~7일 전 스냅샷 대비 멤버별 전투력 성장.
