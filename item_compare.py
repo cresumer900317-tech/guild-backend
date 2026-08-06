@@ -15,7 +15,7 @@ import os
 import time
 from collections import deque
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 log = logging.getLogger("guild.item_compare")
 
@@ -121,7 +121,14 @@ _GAME_KNOWLEDGE = """\
    - 보스/길드 레이드: 보스 몬스터 데미지 유효, 제곱근 피해 조정. 지속 딜 중요 → 스킬 데미지·쿨감 가치↑
    - 사냥(스테이지): 일반 몬스터 데미지·기본 공격 대상 수·공격 속도 가치↑
    - PVP(아레나·콜로세움): 보스/일반 몬스터 데미지 무효. 공/방 능력치와 최대 HP·받피감이 보정에 반영. 레벨 보정 존재
-6. 전투력은 참고 지표일 뿐, 콘텐츠별 실전 가치와 다를 수 있음 (예: 보스 데미지는 전투력 가중치가 낮지만 보스전 실전 가치는 높음)."""
+6. 전투력은 참고 지표일 뿐, 콘텐츠별 실전 가치와 다를 수 있음 (예: 보스 데미지는 전투력 가중치가 낮지만 보스전 실전 가치는 높음).
+
+[실전 가치 통설 — 전투력 숫자보다 우선하는 판정 기준]
+- ★ 기본 공격 데미지: 이 게임 최고 가치 옵션(정석). 방치형 특성상 대부분의 딜은 기본 공격에서 나오므로 실전 딜 기여가 전투력 가중치(×500)보다 훨씬 큼. 기본 공격 데미지 % 옵션 하나가 크확·명중·스킬레벨 여러 개 조합보다 정석으로 평가되는 경우가 많음.
+- 명중: 전투력 가중치(×4,500)가 매우 커서 전투력은 크게 오르지만, PvE 실전 가치는 낮음(몬스터 회피가 낮아 체감 없음). 대표적인 '전투력 함정' 옵션.
+- 크리티컬 확률: 캐릭터의 크확이 이미 100%에 가깝다면 초과분은 완전히 무의미. 사용자의 현재 크확 정보가 있으면 반드시 반영.
+- 데미지류 %: 이미 같은 종류의 수치가 높이 쌓여 있을수록(합산 방식) 상대적 체감이 줄어듦.
+- 전투력 변화 수치가 크더라도 위 기준으로 실전 가치가 낮은 옵션 조합이라면, 전투력과 반대로 판정하고 그 이유를 summary 에 설명할 것."""
 
 _SYSTEM = f"""당신은 모바일 게임 '메이플 키우기'의 아이템 비교 전문가입니다.
 사용자가 올린 게임 내 아이템 비교 스크린샷을 판독하고, 어느 쪽이 좋은지 판정합니다.
@@ -135,9 +142,10 @@ _SYSTEM = f"""당신은 모바일 게임 '메이플 키우기'의 아이템 비�
 - 숫자는 천 단위 구분 쉼표를 제거하고 정확히 읽으세요. 확실하지 않은 값은 null 로 두세요.
 
 [판정 원칙]
-- 전투력 공식 가중치로 정량 비교하되, 콘텐츠별 실전 가치(보스/사냥/PVP)를 반드시 구분해 판정하세요.
-- 옵션 종류가 다를 때(예: 2차 스킬 레벨 vs 4차 스킬 레벨)는 가중치 표로 환산해 비교 근거를 제시하세요.
-- 요약(summary)은 길드원에게 말하듯 한국어로 2~4문장, 결론부터 명확하게.
+- 판정 기준은 "실전 딜/생존 기여"입니다. 전투력 변화 숫자는 참고만 하고 그대로 따르지 마세요. 특히 명중·크확 위주 조합이 전투력을 크게 올려도, 기본 공격 데미지 같은 정석 옵션이 실전에서 더 좋다면 정석 쪽을 선택하세요.
+- 옵션 종류가 다를 때(예: 2차 스킬 레벨 vs 4차 스킬 레벨)는 가중치 표의 정확한 수치를 인용해 비교 근거를 제시하세요. 가중치를 인용할 때는 위 표의 값을 그대로 쓰세요(임의 변경 금지).
+- 사용자가 스펙 정보(직업·레벨·크리티컬 확률·주력 콘텐츠·딜 스타일 등)를 제공하면 그것을 최우선으로 반영하세요. 예: 크확이 이미 100% 근처면 크확 옵션 가치 0, 기본 공격 위주 직업이면 기본 공격 데미지 가치 최상급.
+- 요약(summary)은 길드원에게 말하듯 한국어로 2~4문장, 결론부터 명확하게. 전투력 변화와 결론이 다르면 왜 다른지 꼭 설명하세요.
 - 스크린샷이 아이템 비교 화면이 아니면 parse_ok=false 로 하고 error 에 이유를 적으세요."""
 
 _OUTPUT_SCHEMA = {
@@ -205,7 +213,7 @@ _OUTPUT_SCHEMA = {
 
 
 @router.post("/analyze")
-async def analyze(request: Request, file: UploadFile = File(...)):
+async def analyze(request: Request, file: UploadFile = File(...), context: str = Form("")):
     if not _is_enabled():
         raise HTTPException(status_code=503, detail="AI 분석 기능이 아직 설정되지 않았어요")
     if not _rate_limit_ok(_client_ip(request)):
@@ -219,6 +227,15 @@ async def analyze(request: Request, file: UploadFile = File(...)):
     if len(content) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="이미지가 너무 큽니다 (8MB 이하)")
     media_type = _media_type(content, file.filename or "")
+
+    ask = "이 아이템 비교 스크린샷을 분석해서 어느 쪽이 좋은지 판정해줘."
+    context = (context or "").strip()[:2000]
+    if context:
+        ask += (
+            "\n\n[내 캐릭터 스펙 — 판정에 최우선 반영]\n"
+            f"{context}\n"
+            "위 스펙 기준으로 실전 가치를 판단해줘."
+        )
 
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
     model = _model()
@@ -241,7 +258,7 @@ async def analyze(request: Request, file: UploadFile = File(...)):
                             "data": base64.standard_b64encode(content).decode("ascii"),
                         },
                     },
-                    {"type": "text", "text": "이 아이템 비교 스크린샷을 분석해서 어느 쪽이 좋은지 판정해줘."},
+                    {"type": "text", "text": ask},
                 ],
             }],
         )
