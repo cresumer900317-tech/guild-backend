@@ -316,6 +316,10 @@ except Exception as _e:
 from mansu import router as mansu_router  # noqa: E402
 app.include_router(mansu_router)
 
+# 아이템 비교 AI (스크린샷 판독·판정)
+from item_compare import router as item_compare_router  # noqa: E402
+app.include_router(item_compare_router)
+
 
 @app.get("/")
 def root():
