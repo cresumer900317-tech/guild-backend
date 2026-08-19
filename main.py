@@ -3091,7 +3091,7 @@ def delete_personal_project(project_id: int, user: dict = Depends(get_current_us
 
 ALLOWED_SNIPPET_KIND = {"single", "tb4", "note"}  # note = 코드 아닌 텍스트 메모 (본문은 content 재사용)
 SNIPPET_MAX = 200000  # 코드 한 칸 최대 길이 (≈200KB)
-NOTE_MAX = 2000000    # 메모(note)는 태그매핑 표 등 큰 자료 대비 넉넉하게 (≈2MB)
+NOTE_MAX = 8000000    # 메모(note)는 단일 HTML 도구(CAD 워크벤치 4.2MB 등) 통째 전달 대비 (≈8MB)
 
 
 class PersonalSnippetCreate(BaseModel):
