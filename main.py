@@ -3139,6 +3139,9 @@ _SENSITIVE_PATTERNS = [
 ]
 # 전달함 보관 기간 — 지나면 목록 조회 때 자동 삭제 (누적 저장소가 되지 않게)
 SNIPPET_RETENTION_DAYS = int(os.environ.get("SNIPPET_RETENTION_DAYS", "7"))
+# ICP(공용) 전달함은 본인 항목만 자동 삭제 대상. 다른 사람 항목은 절대 건드리지 않는다.
+# 자동 삭제를 켤 사용자 목록 — 비어 있으면 ICP 자동 삭제 없음. 예: ICP_RETENTION_AUTHORS="Jett"
+ICP_RETENTION_AUTHORS = {a.strip() for a in os.environ.get("ICP_RETENTION_AUTHORS", "Jett").split(",") if a.strip()}
 
 
 def _reject_sensitive(*parts: Optional[str]):
@@ -3332,7 +3335,9 @@ def icp_login(req: IcpLoginRequest, request: Request):
 
 @app.get("/api/icp/snippets")
 def list_icp_snippets(user: dict = Depends(get_icp_user)):
-    _purge_expired_snippets("icp_snippets")
+    # 자동 삭제는 "지금 로그인한 본인" 항목만, 그것도 ICP_RETENTION_AUTHORS 에 든 사용자만
+    if user["name"] in ICP_RETENTION_AUTHORS:
+        _purge_expired_snippets("icp_snippets", author=user["name"])
     result = supabase.table("icp_snippets").select("*") \
         .order("sort_order").order("updated_at", desc=True).execute()
     return result.data or []
