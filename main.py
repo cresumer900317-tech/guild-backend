@@ -323,7 +323,7 @@ app.include_router(item_compare_router)
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "친구패밀리 백엔드 작동 중!", "version": "2026-04-15-v3"}
+    return {"status": "ok", "message": "친구패밀리 백엔드 작동 중!", "version": "2026-09-01-icp-purge-fix"}
 
 
 @app.get("/privacy", response_class=HTMLResponse)
