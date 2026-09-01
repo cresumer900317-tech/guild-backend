@@ -3124,8 +3124,50 @@ def _validate_snippet_len(*parts: Optional[str], kind: str = "single"):
             raise HTTPException(status_code=400, detail=msg)
 
 
+# ── 전달함 보안 가드 ─────────────────────────────────────────
+# 전달함(/hq 전달함, /icp)은 "개인 PC에서 만든 코드를 회사 PC로 가져가는" 단방향 용도다.
+# 회사 시스템에서 내보낸 정보(웹훅 URL, 토큰, 내부 IP, 사내 계정, 비밀번호 값)가
+# 개인 서비스(Supabase)에 저장되지 않도록 저장 시점에 거부한다.
+# 클라이언트(icp.js)에도 같은 패턴이 있지만 최종 방어선은 여기다.
+_SENSITIVE_PATTERNS = [
+    (re.compile(r"webhook\.office\.com|logic\.azure\.com|powerautomate\.com|hooks\.slack\.com|discord(?:app)?\.com/api/webhooks", re.I), "웹훅 URL"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}"), "인증 토큰(JWT)"),
+    (re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"), "내부 IP 주소"),
+    (re.compile(r"[\w.+-]+@coupang\.com", re.I), "사내 이메일"),
+    # 리터럴 값이 붙은 경우만 (password: settings.password 같은 코드 참조는 통과)
+    (re.compile(r"\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token)\b\s*[:=]\s*[\"'][^\"']{4,}[\"']", re.I), "비밀번호/키 값"),
+]
+# 전달함 보관 기간 — 지나면 목록 조회 때 자동 삭제 (누적 저장소가 되지 않게)
+SNIPPET_RETENTION_DAYS = int(os.environ.get("SNIPPET_RETENTION_DAYS", "7"))
+
+
+def _reject_sensitive(*parts: Optional[str]):
+    for p in parts:
+        if not p:
+            continue
+        for rx, label in _SENSITIVE_PATTERNS:
+            if rx.search(p):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{label}이(가) 포함되어 있어 저장할 수 없어요. 전달함에는 회사 내부 정보"
+                           "(웹훅·토큰·내부 IP·계정 정보·회사 시스템에서 내보낸 자료)를 올리지 마세요",
+                )
+
+
+def _purge_expired_snippets(table: str, **where):
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SNIPPET_RETENTION_DAYS)).isoformat()
+    q = supabase.table(table).delete().lt("updated_at", cutoff)
+    for k, v in where.items():
+        q = q.eq(k, v)
+    try:
+        q.execute()
+    except Exception as e:  # 정리 실패가 목록 조회를 막으면 안 됨
+        print(f"[snippets] purge failed ({table}): {e}")
+
+
 @app.get("/api/me/snippets")
 def list_personal_snippets(user: dict = Depends(get_current_user)):
+    _purge_expired_snippets("personal_snippets", owner=user["character_name"])
     result = supabase.table("personal_snippets") \
         .select("*").eq("owner", user["character_name"]) \
         .order("sort_order").order("updated_at", desc=True).execute()
@@ -3141,6 +3183,7 @@ def create_personal_snippet(req: PersonalSnippetCreate, user: dict = Depends(get
     if len(title) > 200:
         raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
     _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    _reject_sensitive(title, req.content, req.html, req.css, req.js, req.settings)
     row = {
         "owner": user["character_name"],
         "title": title,
@@ -3163,6 +3206,7 @@ def update_personal_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: d
     if not existing.data:
         raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
     _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
+    _reject_sensitive(req.title, req.content, req.html, req.css, req.js, req.settings)
     updates: dict = {}
     if req.title is not None:
         t = req.title.strip()
@@ -3288,6 +3332,7 @@ def icp_login(req: IcpLoginRequest, request: Request):
 
 @app.get("/api/icp/snippets")
 def list_icp_snippets(user: dict = Depends(get_icp_user)):
+    _purge_expired_snippets("icp_snippets")
     result = supabase.table("icp_snippets").select("*") \
         .order("sort_order").order("updated_at", desc=True).execute()
     return result.data or []
@@ -3302,6 +3347,7 @@ def create_icp_snippet(req: PersonalSnippetCreate, user: dict = Depends(get_icp_
     if len(title) > 200:
         raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
     _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings, kind=kind)
+    _reject_sensitive(title, req.content, req.html, req.css, req.js, req.settings)
     row = {
         "author": user["name"],
         "title": title,
@@ -3324,6 +3370,7 @@ def update_icp_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: dict =
         raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
     effective_kind = req.kind or existing.data[0].get("kind") or "single"
     _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings, kind=effective_kind)
+    _reject_sensitive(req.title, req.content, req.html, req.css, req.js, req.settings)
     updates: dict = {}
     if req.title is not None:
         t = req.title.strip()
