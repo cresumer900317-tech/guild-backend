@@ -8,8 +8,8 @@ import unicodedata
 import secrets as _secrets
 import jwt
 from pydantic import BaseModel, field_validator, Field
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, File, Form, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import bcrypt
 from fastapi.responses import HTMLResponse
@@ -3360,11 +3360,155 @@ def update_icp_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: dict =
 
 @app.delete("/api/icp/snippets/{snippet_id}")
 def delete_icp_snippet(snippet_id: int, user: dict = Depends(get_icp_user)):
-    existing = supabase.table("icp_snippets").select("id").eq("id", snippet_id).execute()
+    existing = supabase.table("icp_snippets").select("id, kind, content").eq("id", snippet_id).execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
+    # kind=file 이면 Storage 원본도 지운다 (실패해도 DB 행 삭제는 진행)
+    row = existing.data[0]
+    if row.get("kind") == "file":
+        meta = _icp_file_meta(row.get("content"))
+        if meta.get("path"):
+            _icp_storage_delete(meta["path"])
     supabase.table("icp_snippets").delete().eq("id", snippet_id).execute()
     return {"status": "ok"}
+
+
+# ── ICP 파일 첨부 (엑셀 등 원본 파일) ─────────────────────────────
+# kind="file" 스니펫: 원본 바이너리는 Supabase Storage 비공개 버킷에 두고,
+# icp_snippets.content 에 메타데이터 JSON({path,name,size,mime})만 저장한다.
+# 다운로드는 백엔드가 ICP 인증 확인 후 스트리밍 (버킷은 공개 아님).
+def _icp_file_bucket() -> str:
+    return os.environ.get("SUPABASE_STORAGE_BUCKET_ICP", "icp-files").strip() or "icp-files"
+
+
+def _icp_file_meta(content: Optional[str]) -> dict:
+    try:
+        m = json.loads(content or "{}")
+        return m if isinstance(m, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _icp_ensure_bucket():
+    """icp-files 버킷이 없으면 비공개로 생성 (멱등, 이미 있으면 무시)."""
+    sb_url = os.environ.get("SUPABASE_URL", "").strip()
+    sb_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    if not sb_url or not sb_key:
+        return
+    try:
+        import httpx
+        with httpx.Client(timeout=30) as client:
+            client.post(
+                f"{sb_url}/storage/v1/bucket",
+                json={"name": _icp_file_bucket(), "id": _icp_file_bucket(), "public": False},
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+            )  # 이미 있으면 400/409 — 무시
+    except Exception as e:  # noqa: BLE001
+        print(f"[icp] ensure bucket skipped: {e}")
+
+
+def _icp_storage_delete(path: str):
+    import urllib.parse
+    sb_url = os.environ.get("SUPABASE_URL", "").strip()
+    sb_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    if not sb_url or not sb_key or not path:
+        return
+    try:
+        import httpx
+        with httpx.Client(timeout=30) as client:
+            client.delete(
+                f"{sb_url}/storage/v1/object/{_icp_file_bucket()}/{urllib.parse.quote(path)}",
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"},
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"[icp] storage delete failed ({path}): {e}")
+
+
+@app.post("/api/icp/files")
+async def upload_icp_file(
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    user: dict = Depends(get_icp_user),
+):
+    import urllib.parse
+    content = await file.read()
+    size = len(content)
+    if size <= 0:
+        raise HTTPException(status_code=400, detail="빈 파일입니다")
+
+    orig = (file.filename or "file").strip()
+    ext = (os.path.splitext(orig)[1] or "")[:12]
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    rand = _secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10]
+    storage_path = f"{user['name']}/{ts}-{rand}{ext}"
+
+    sb_url = os.environ.get("SUPABASE_URL", "").strip()
+    sb_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    if not sb_url or not sb_key:
+        raise HTTPException(status_code=500, detail="Supabase 설정이 안 되어 있습니다")
+
+    _icp_ensure_bucket()
+    mime = file.content_type or "application/octet-stream"
+    import httpx
+    up_url = f"{sb_url}/storage/v1/object/{_icp_file_bucket()}/{urllib.parse.quote(storage_path)}"
+    try:
+        with httpx.Client(timeout=120) as client:
+            r = client.post(
+                up_url, content=content,
+                headers={
+                    "apikey": sb_key, "Authorization": f"Bearer {sb_key}",
+                    "Content-Type": mime, "x-upsert": "false",
+                },
+            )
+        if r.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Storage 업로드 실패 ({r.status_code}): {r.text[:200]}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Storage 통신 실패: {e}")
+
+    meta = {"path": storage_path, "name": orig, "size": size, "mime": mime}
+    row = {
+        "author": user["name"],
+        "title": (title or orig).strip()[:200],
+        "kind": "file",
+        "content": json.dumps(meta, ensure_ascii=False),
+        "html": "", "css": "", "js": "", "settings": "",
+        "sort_order": 0,
+    }
+    result = supabase.table("icp_snippets").insert(row).execute()
+    return result.data[0] if result.data else {}
+
+
+@app.get("/api/icp/files/{snippet_id}/download")
+def download_icp_file(snippet_id: int, user: dict = Depends(get_icp_user)):
+    import urllib.parse
+    existing = supabase.table("icp_snippets").select("kind, content").eq("id", snippet_id).execute()
+    if not existing.data or existing.data[0].get("kind") != "file":
+        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다")
+    meta = _icp_file_meta(existing.data[0].get("content"))
+    if not meta.get("path"):
+        raise HTTPException(status_code=404, detail="파일 경로가 없습니다")
+
+    sb_url = os.environ.get("SUPABASE_URL", "").strip()
+    sb_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    if not sb_url or not sb_key:
+        raise HTTPException(status_code=500, detail="Supabase 설정이 안 되어 있습니다")
+
+    import httpx
+    obj_url = f"{sb_url}/storage/v1/object/{_icp_file_bucket()}/{urllib.parse.quote(meta['path'])}"
+    try:
+        r = httpx.get(obj_url, headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}, timeout=120)
+        if r.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Storage 조회 실패 ({r.status_code})")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Storage 통신 실패: {e}")
+
+    fname = meta.get("name") or "file"
+    disp = "attachment; filename*=UTF-8''" + urllib.parse.quote(fname)
+    return StreamingResponse(
+        iter([r.content]),
+        media_type=meta.get("mime") or "application/octet-stream",
+        headers={"Content-Disposition": disp},
+    )
 
 
 # ── Inbox (즉흥 메모) ─────────────────────────────────────────
