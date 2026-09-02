@@ -3090,8 +3090,6 @@ def delete_personal_project(project_id: int, user: dict = Depends(get_current_us
 # ── 코드 전달함 (Snippets) — 맥↔회사 노트북 코드 브릿지 ──────────
 
 ALLOWED_SNIPPET_KIND = {"single", "tb4", "note"}  # note = 코드 아닌 텍스트 메모 (본문은 content 재사용)
-SNIPPET_MAX = 200000  # 코드 한 칸 최대 길이 (≈200KB)
-NOTE_MAX = 8000000    # 메모(note)는 단일 HTML 도구(CAD 워크벤치 4.2MB 등) 통째 전달 대비 (≈8MB)
 
 
 class PersonalSnippetCreate(BaseModel):
@@ -3116,45 +3114,14 @@ class PersonalSnippetUpdate(BaseModel):
     sort_order: Optional[int] = None
 
 
-def _validate_snippet_len(*parts: Optional[str], kind: str = "single"):
-    limit = NOTE_MAX if kind == "note" else SNIPPET_MAX
-    msg = "메모가 너무 깁니다 (2MB 이내)" if kind == "note" else "코드가 너무 깁니다 (한 칸 200KB 이내)"
-    for p in parts:
-        if p and len(p) > limit:
-            raise HTTPException(status_code=400, detail=msg)
-
-
-# ── 전달함 보안 가드 ─────────────────────────────────────────
-# 전달함(/hq 전달함, /icp)은 "개인 PC에서 만든 코드를 회사 PC로 가져가는" 단방향 용도다.
-# 회사 시스템에서 내보낸 정보(웹훅 URL, 토큰, 내부 IP, 사내 계정, 비밀번호 값)가
-# 개인 서비스(Supabase)에 저장되지 않도록 저장 시점에 거부한다.
-# 클라이언트(icp.js)에도 같은 패턴이 있지만 최종 방어선은 여기다.
-_SENSITIVE_PATTERNS = [
-    (re.compile(r"webhook\.office\.com|logic\.azure\.com|powerautomate\.com|hooks\.slack\.com|discord(?:app)?\.com/api/webhooks", re.I), "웹훅 URL"),
-    (re.compile(r"eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}"), "인증 토큰(JWT)"),
-    (re.compile(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"), "내부 IP 주소"),
-    (re.compile(r"[\w.+-]+@coupang\.com", re.I), "사내 이메일"),
-    # 리터럴 값이 붙은 경우만 (password: settings.password 같은 코드 참조는 통과)
-    (re.compile(r"\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token)\b\s*[:=]\s*[\"'][^\"']{4,}[\"']", re.I), "비밀번호/키 값"),
-]
+# ── 전달함 정리 ─────────────────────────────────────────
+# 업로드 용량 제한·민감정보 가드는 2026-09-02 제거 — 회사에서 전달함 접근이 차단되어
+# (개인 사이트 차단 롤아웃) 개인 기기 간 전용이 됐고, PLC 코드의 내부 IP 등이 걸려 불편만 남음.
 # 전달함 보관 기간 — 지나면 목록 조회 때 자동 삭제 (누적 저장소가 되지 않게)
 SNIPPET_RETENTION_DAYS = int(os.environ.get("SNIPPET_RETENTION_DAYS", "7"))
 # ICP(공용) 전달함은 본인 항목만 자동 삭제 대상. 다른 사람 항목은 절대 건드리지 않는다.
 # 자동 삭제를 켤 사용자 목록 — 비어 있으면 ICP 자동 삭제 없음. 예: ICP_RETENTION_AUTHORS="Jett"
 ICP_RETENTION_AUTHORS = {a.strip() for a in os.environ.get("ICP_RETENTION_AUTHORS", "Jett").split(",") if a.strip()}
-
-
-def _reject_sensitive(*parts: Optional[str]):
-    for p in parts:
-        if not p:
-            continue
-        for rx, label in _SENSITIVE_PATTERNS:
-            if rx.search(p):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{label}이(가) 포함되어 있어 저장할 수 없어요. 전달함에는 회사 내부 정보"
-                           "(웹훅·토큰·내부 IP·계정 정보·회사 시스템에서 내보낸 자료)를 올리지 마세요",
-                )
 
 
 def _purge_expired_snippets(table: str, **where):
@@ -3185,8 +3152,6 @@ def create_personal_snippet(req: PersonalSnippetCreate, user: dict = Depends(get
     title = (req.title or "").strip()
     if len(title) > 200:
         raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
-    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
-    _reject_sensitive(title, req.content, req.html, req.css, req.js, req.settings)
     row = {
         "owner": user["character_name"],
         "title": title,
@@ -3208,8 +3173,6 @@ def update_personal_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: d
         .select("*").eq("id", snippet_id).eq("owner", user["character_name"]).execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
-    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings)
-    _reject_sensitive(req.title, req.content, req.html, req.css, req.js, req.settings)
     updates: dict = {}
     if req.title is not None:
         t = req.title.strip()
@@ -3351,8 +3314,6 @@ def create_icp_snippet(req: PersonalSnippetCreate, user: dict = Depends(get_icp_
     title = (req.title or "").strip()
     if len(title) > 200:
         raise HTTPException(status_code=400, detail="제목은 200자 이내로 입력해주세요")
-    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings, kind=kind)
-    _reject_sensitive(title, req.content, req.html, req.css, req.js, req.settings)
     row = {
         "author": user["name"],
         "title": title,
@@ -3374,8 +3335,6 @@ def update_icp_snippet(snippet_id: int, req: PersonalSnippetUpdate, user: dict =
     if not existing.data:
         raise HTTPException(status_code=404, detail="스니펫을 찾을 수 없습니다")
     effective_kind = req.kind or existing.data[0].get("kind") or "single"
-    _validate_snippet_len(req.content, req.html, req.css, req.js, req.settings, kind=effective_kind)
-    _reject_sensitive(req.title, req.content, req.html, req.css, req.js, req.settings)
     updates: dict = {}
     if req.title is not None:
         t = req.title.strip()
