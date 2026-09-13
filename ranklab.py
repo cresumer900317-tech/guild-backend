@@ -37,7 +37,7 @@ _JOB_TTL = 60 * 30
 _RATE: dict[str, deque] = {}
 _RATE_PER_MIN = 6
 _NAVER_URL = re.compile(r"^https://([a-z0-9-]+\.)*naver\.com/[^\s]+$", re.I)
-_PID = re.compile(r"/(?:window-)?products/(?:[^/?#]+/)?(\d+)")
+_PID = re.compile(r"/(?:window-)?products/(?:[^/?#]+/)?(\d+)|/catalog/(\d+)")   # 상품 상세 또는 가격비교(카탈로그)
 
 
 class LookupIn(BaseModel):
@@ -111,7 +111,7 @@ def create_lookup(body: LookupIn, request: Request):
     url = (body.url or "").strip()
     kw = re.sub(r"\s+", " ", (body.keyword or "").strip())
     if not _NAVER_URL.match(url) or not _PID.search(url):
-        raise HTTPException(status_code=400, detail="네이버 스토어 상품 상세 링크(…/products/상품ID)만 조회할 수 있습니다")
+        raise HTTPException(status_code=400, detail="네이버 상품 상세 링크(…/products/상품ID) 또는 가격비교 링크(…/catalog/MID)만 조회할 수 있습니다")
     if not (1 <= len(kw) <= 40):
         raise HTTPException(status_code=400, detail="키워드는 1~40자")
     if len(_QUEUE) >= _MAX_PENDING:
@@ -120,7 +120,7 @@ def create_lookup(body: LookupIn, request: Request):
     _JOBS[jid] = {
         "id": jid, "status": "queued", "step": "대기 중", "created": time.time(),
         "url": url, "keyword": kw, "pages": max(1, min(13, int(body.pages or 13))),
-        "pid": _PID.search(url).group(1), "result": None, "error": None,
+        "pid": _PID.search(url).group(1) or "", "catalogId": _PID.search(url).group(2) or "", "result": None, "error": None,
     }
     _QUEUE.append(jid)
     return _public(_JOBS[jid])
@@ -147,7 +147,7 @@ def worker_claim(x_worker_key: Optional[str] = Header(default=None)):
             job["status"] = "running"
             job["step"] = "상품 페이지 여는 중"
             job["started"] = time.time()
-            return {k: job[k] for k in ("id", "url", "keyword", "pages", "pid")}
+            return {k: job[k] for k in ("id", "url", "keyword", "pages", "pid", "catalogId")}
     return Response(status_code=204)
 
 
