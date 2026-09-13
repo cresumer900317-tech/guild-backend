@@ -174,6 +174,25 @@ def worker_result(body: ResultIn, x_worker_key: Optional[str] = Header(default=N
     return {"ok": True}
 
 
+@router.get("/recent")
+def recent(key: Optional[str] = None, limit: int = 30):
+    """최근 조회 내역 (워커 토큰을 key 로). 휴대폰에서 등록 여부 확인용."""
+    _check_worker(key)
+    jobs = sorted(_JOBS.values(), key=lambda j: j["created"], reverse=True)[: max(1, min(100, limit))]
+    out = []
+    for j in jobs:
+        r = j.get("result") or {}
+        out.append({
+            "시각": time.strftime("%m-%d %H:%M:%S", time.localtime(j["created"] + 9 * 3600)),
+            "상태": {"queued": "대기", "running": "조회중", "done": "완료", "failed": "실패"}.get(j["status"], j["status"]),
+            "진행": j.get("step"), "키워드": j["keyword"], "url": j["url"],
+            "상품명": r.get("name"), "상품ID": r.get("pid"), "단일MID": r.get("nvMid"),
+            "순위": (r.get("rank") if r.get("found") else ("순위없음" if r else None)),
+            "소요초": (round(r["elapsedMs"] / 1000) if r.get("elapsedMs") else None), "오류": j.get("error"),
+        })
+    return {"count": len(out), "jobs": out}
+
+
 @router.get("/status")
 def status():
     """워커 생존/큐 길이 (페이지가 '조회 서버 연결됨' 표시용)."""
