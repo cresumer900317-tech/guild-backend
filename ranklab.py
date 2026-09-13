@@ -28,7 +28,8 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/ranklab", tags=["ranklab"])
 
-_WORKER_KEY = hashlib.sha256((os.getenv("SUPABASE_SERVICE_KEY") or "").encode()).hexdigest()
+# 워커 인증: RANKLAB_WORKER_TOKEN(전용 토큰) 우선, 없으면 SUPABASE_SERVICE_KEY 의 sha256
+_WORKER_KEY = (os.getenv("RANKLAB_WORKER_TOKEN") or "").strip() or hashlib.sha256((os.getenv("SUPABASE_SERVICE_KEY") or "").encode()).hexdigest()
 _JOBS: dict[str, dict] = {}
 _QUEUE: deque[str] = deque()
 _MAX_PENDING = 20
