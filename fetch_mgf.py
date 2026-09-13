@@ -181,6 +181,7 @@ def parse_members_from_html(html: str, guild_name: str, guild_level: int = 0):
             "power_text": power_text,
             "detail_url": detail_url,
             "image": "",
+            "boss_score": int(row["data-gb"]) if str(row.get("data-gb", "")).isdigit() else None,
             "is_master": bool(master_el),
             "overall_rank": 0,
             "server_rank": 0,
@@ -196,6 +197,11 @@ def fetch_mgf_data():
         print(f"수집 중: {guild_name}")
         html = fetch_page(url, retries=1)
         save_debug_html(guild_name, html)
+        try:
+            from guild_source import remember_guild_html
+            remember_guild_html(guild_name, html)
+        except ValueError:
+            pass  # Existing roster guard protects missing guilds; source endpoint marks failures.
         guild_level = parse_guild_level(html)
         print(f" -> 길드 레벨: {guild_level}")
         members = parse_members_from_html(html, guild_name, guild_level)

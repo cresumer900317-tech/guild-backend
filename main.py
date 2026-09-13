@@ -546,6 +546,18 @@ def snapshot_pop_backfill(admin: dict = Depends(require_admin)):
     return {"status": "ok", "message": f"{snapshot_month} 스냅샷에 인기도 {updated}명 반영 완료"}
 
 
+@app.get("/api/guild-source")
+def guild_source_observation(guild: str = "친구들"):
+    from guild_source import get_guild_source
+    from config import TARGET_GUILD_URLS
+    if guild not in TARGET_GUILD_URLS:
+        raise HTTPException(status_code=400, detail="등록된 길드만 조회할 수 있습니다.")
+    try:
+        return get_guild_source(guild)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="MGF 원본 조회가 지연되고 있습니다. 잠시 후 다시 시도해 주세요.")
+
+
 @app.get("/api/monthly")
 def get_monthly():
     """
@@ -572,6 +584,7 @@ def get_monthly():
         headers={"apikey": _sb_key, "Authorization": f"Bearer {_sb_key}"},
         timeout=15,
     )
+    _snap_resp.raise_for_status()
     snapshot_map = {s["name"]: s for s in _snap_resp.json()}
 
     result = []
@@ -621,6 +634,7 @@ def get_monthly():
             "monthlyDiff": monthly_diff,
             "growthRate": growth_rate,
             "snapshotMonth": snapshot_month,
+            "snapshotCapturedAt": snap.get("captured_at") if snap else None,
             "monthlyServerDiff": monthly_server_diff,
             "hasSnapshot": snap is not None,
             "isMaster": cur.get("is_master", False),
@@ -632,7 +646,7 @@ def get_monthly():
         })
 
     # 성장량 기준 정렬 (null은 뒤로)
-    result.sort(key=lambda x: x.get("monthlyDiff") or -999999999, reverse=True)
+    result.sort(key=lambda x: (x.get("monthlyDiff") is not None, x.get("monthlyDiff") or 0), reverse=True)
     return cache_set("monthly", result)
 
 

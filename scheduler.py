@@ -152,7 +152,8 @@ def to_snake(members):
         result.append({
             "captured_at": m.get("capturedAt"),
             "guild": m.get("guild"),
-            "guild_level": m.get("guild_level", 0),
+            "guild_level": m.get("guildLevel", m.get("guild_level", 0)),
+            "boss_score": m.get("bossScore"),
             "name": m.get("name"),
             "job": m.get("job"),
             "level": m.get("level"),
@@ -262,7 +263,8 @@ def run_crawl():
             for m in members:
                 saved = keep_map.get(m.get("name")) or {}
                 for c in KEEP_COLS:  # 모든 행에 동일 키 보장(이전 값 복원 or None)
-                    m[c] = saved.get(c)
+                    if m.get(c) is None:
+                        m[c] = saved.get(c)
             supabase.table("members").insert(members).execute()
             batch_ts = [m["captured_at"] for m in members if m.get("captured_at")]
             if batch_ts:
@@ -347,12 +349,13 @@ def run_boss_rank_update():
         updated = 0
         for raw_name, mid in name_to_id.items():
             n = norm_name(raw_name)
-            patch = {
-                "boss_score":  (gb.get(n) or {}).get("score"),
-                "boss_rank":   (gb.get(n) or {}).get("rank"),
-                "wboss_score": (wb.get(n) or {}).get("score"),
-                "wboss_rank":  (wb.get(n) or {}).get("rank"),
-            }
+            patch = {}
+            if n in gb:
+                patch.update({"boss_score":gb[n].get("score"),"boss_rank":gb[n].get("rank")})
+            if n in wb:
+                patch.update({"wboss_score":wb[n].get("score"),"wboss_rank":wb[n].get("rank")})
+            if not patch:
+                continue  # A missing/blocked rank page must not erase known scores.
             supabase.table("members").update(patch).eq("id", mid).execute()
             if any(v is not None for v in patch.values()):
                 updated += 1
