@@ -64,6 +64,7 @@ def transform_data(raw_data):
             "popularity": item.get("popularity", 0),
             "detailUrl": item.get("detail_url", ""),
             "isMaster": item.get("is_master", False),
+            "bossScore": item.get("boss_score"),
             "capturedAt": item.get("capturedAt"),
         })
 
