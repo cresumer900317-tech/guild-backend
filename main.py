@@ -321,6 +321,10 @@ app.include_router(mansu_router)
 from item_compare import router as item_compare_router  # noqa: E402
 app.include_router(item_compare_router)
 
+# RANKLAB 데모 상품 조회 큐 (jisoar.com/sample ↔ 로컬 워커)
+from ranklab import router as ranklab_router  # noqa: E402
+app.include_router(ranklab_router)
+
 
 @app.get("/")
 def root():
