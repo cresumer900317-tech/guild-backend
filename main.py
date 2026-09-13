@@ -20,6 +20,7 @@ from push_send import _send  # Expo Push 발송 헬퍼(가입 문의 → 운영�
 from static_pages import PRIVACY_HTML, SUPPORT_HTML, TERMS_HTML, DELETE_ACCOUNT_HTML
 from datetime import datetime, timedelta, date, timezone
 from zoneinfo import ZoneInfo
+from guild_analytics import latest_members, current_server_rows, captured_time, growth_story, guild_dashboard
 
 # JWT_SECRET 미설정 시 공개 소스의 기본값으로 토큰이 위조되는 걸 막기 위해
 # 부팅마다 랜덤 시크릿 사용(fail-closed). 단 이 경우 재배포 때마다 전원 재로그인 필요 →
@@ -365,7 +366,11 @@ def fetch_members_raw(filters: str = "", order: str = "server_rank"):
         "apikey": sb_key,
         "Authorization": f"Bearer {sb_key}",
     }, timeout=15)
+    resp.raise_for_status()
     data = resp.json()
+    if not isinstance(data, list):
+        raise HTTPException(status_code=502, detail="길드원 데이터 응답을 확인할 수 없습니다")
+    data = latest_members(data)
     # 크롤 배치 중복 방어 — 이전 배치 정리가 실패해도 같은 이름은 captured_at 최신 행만 반환
     if isinstance(data, list) and data and isinstance(data[0], dict):
         best = {}
@@ -445,93 +450,33 @@ def update_pop_rank(admin: dict = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+def load_family_history(members, since):
+    """Stable pagination: never silently truncate a month to PostgREST's 1000 rows."""
+    names = sorted({_nfc(m.get("name")) for m in members if m.get("name")})
+    if not names:
+        return []
+    rows = []
+    for start in range(0, 100000, 1000):
+        batch = (supabase.table("server_ranking_history")
+                 .select("name,power,snapshot_date,server_rank,guild")
+                 .in_("name", names).gte("snapshot_date", since)
+                 .order("snapshot_date").order("name")
+                 .range(start, start + 999).execute()).data or []
+        rows.extend(batch)
+        if len(batch) < 1000:
+            return rows
+    raise HTTPException(status_code=503, detail="성장 이력 조회 범위를 초과했습니다")
+
+
 @app.get("/api/growth-story")
 def get_growth_story():
-    """홈 '성장 라이브' — 오늘의 성장 피드·길드 합계 신기록·연속 성장일·경 단위 돌파·다음 목표.
-    server_ranking_history(일별 스냅샷)만으로 계산. 크롤 후 무효화 캐시."""
-    cached = cache_get("growth_story", 3900)
+    cached = cache_get("growth_story", 300)
     if cached is not None:
         return cached
     members = fetch_members_raw()
-    guilds = sorted({_nfc(m.get("guild")) for m in members if m.get("guild")})
-    since = (datetime.now(_KST).date() - timedelta(days=60)).isoformat()
-
-    rows, page = [], 0
-    while page <= 20:
-        res = (supabase.table("server_ranking_history")
-               .select("name,power,snapshot_date")
-               .in_("guild", guilds).gte("snapshot_date", since)
-               .range(page * 1000, page * 1000 + 999).execute())
-        batch = res.data or []
-        rows += batch
-        if len(batch) < 1000:
-            break
-        page += 1
-
-    # (이름,날짜)당 1행으로 dedup 후 합산 — 과거 중복 배치가 남아 있어도 합계가 2배가 되지 않게
-    name_day = {}
-    for r in rows:
-        d, p = r.get("snapshot_date"), int(r.get("power") or 0)
-        if not d:
-            continue
-        name_day.setdefault(_nfc(r.get("name")), {})[d] = p
-    by_date = {}
-    for dm in name_day.values():
-        for d, p in dm.items():
-            by_date[d] = by_date.get(d, 0) + p
-    dates = sorted(by_date)
-    last_date = dates[-1] if dates else None
-    prev_date = dates[-2] if len(dates) >= 2 else None
-
-    # 오늘의 성장 피드 — 마지막 스냅샷 vs 직전 스냅샷
-    gmap = {_nfc(m.get("name")): _nfc(m.get("guild")) for m in members}
-    feed = []
-    if last_date and prev_date:
-        for name, dm in name_day.items():
-            a, b = dm.get(last_date), dm.get(prev_date)
-            if a and b and a > b:
-                feed.append({"name": name, "guild": gmap.get(name),
-                             "diff": a - b, "pct": round((a / b - 1.0) * 100, 2)})
-        feed.sort(key=lambda x: -x["diff"])
-    grew_count = len(feed)
-    feed = feed[:12]
-
-    totals = [(d, by_date[d]) for d in dates]
-    peak_date, peak_total = (None, 0)
-    if totals:
-        peak_date, peak_total = max(totals, key=lambda t: t[1])
-
-    # 연속 성장일 — 오늘은 수집 진행 중(합계가 하루 종일 차오름)이라 완료된 날까지만 센다
-    today_str = datetime.now(_KST).date().isoformat()
-    done = totals[:-1] if (totals and totals[-1][0] == today_str) else totals
-    streak = 0
-    for i in range(len(done) - 1, 0, -1):
-        if done[i][1] > done[i - 1][1]:
-            streak += 1
-        else:
-            break
-
-    GY10 = 10 * (10 ** 16)   # 10경 단위 돌파 이력
-    milestones, seen = [], set()
-    for d, t in totals:
-        floor10 = int(t // GY10) * 10
-        for m10 in range(10, floor10 + 1, 10):
-            if m10 not in seen:
-                seen.add(m10)
-                milestones.append({"gyeong": m10, "date": d})
-    milestones = milestones[-3:]
-
-    cur_total = totals[-1][1] if totals else 0
-    next_goal = (int(cur_total // GY10) + 1) * GY10
-    payload = {
-        "feed": feed, "feedDate": last_date, "prevDate": prev_date, "grewCount": grew_count,
-        "peak": {"total": peak_total, "date": peak_date, "isToday": bool(peak_date and peak_date == last_date)},
-        "streakDays": streak,
-        "milestones": milestones,
-        "goal": {"target": next_goal, "current": cur_total, "remaining": max(0, next_goal - cur_total)},
-        "days": len(totals),
-    }
-    return cache_set("growth_story", payload)
+    today = datetime.now(_KST).date()
+    rows = load_family_history(members, (today - timedelta(days=60)).isoformat())
+    return cache_set("growth_story", growth_story(rows, members, today))
 
 
 @app.get("/api/weekly")
@@ -542,13 +487,13 @@ def get_weekly():
     cached = cache_get("weekly_growth", 3900)   # 크롤(1h) 후 무효화가 신선도 보장
     if cached is not None:
         return cached
-    members = supabase.table("members").select("*").execute().data or []
+    members = fetch_members_raw()
 
     base_date, old_rows = None, {}
     try:
         target = (datetime.now(_KST).date() - timedelta(days=6)).isoformat()
         base = (supabase.table("server_ranking_history").select("snapshot_date")
-                .lte("snapshot_date", target).order("snapshot_date", desc=True)
+                .lte("snapshot_date", target).gte("snapshot_date", (date.fromisoformat(target) - timedelta(days=2)).isoformat()).order("snapshot_date", desc=True)
                 .limit(1).execute())
         if base.data:
             base_date = base.data[0]["snapshot_date"]
@@ -566,7 +511,8 @@ def get_weekly():
         p_now = int(m.get("power") or 0)
         base_row = old_rows.get(_nfc(m.get("name")))
         p_old = int(base_row.get("power") or 0) if base_row else 0
-        has_base = bool(p_now and p_old)
+        observed = captured_time(m.get("captured_at"))
+        has_base = bool(p_now and p_old and observed and base_date and observed.astimezone(_KST).date().isoformat() > base_date)
         row["weekly_diff"] = (p_now - p_old) if has_base else 0
         row["weekly_growth_rate"] = round((p_now / p_old - 1.0) * 100, 2) if has_base else None
         row["weekly_base_power"] = p_old or None
@@ -843,7 +789,7 @@ def get_guild_health(limit: int = 30):
     try:
         target = (datetime.now(_KST).date() - timedelta(days=6)).isoformat()
         base = (supabase.table("server_ranking_history").select("snapshot_date")
-                .lte("snapshot_date", target).order("snapshot_date", desc=True)
+                .lte("snapshot_date", target).gte("snapshot_date", (date.fromisoformat(target) - timedelta(days=2)).isoformat()).order("snapshot_date", desc=True)
                 .limit(1).execute())
         if base.data:
             growth_base_date = base.data[0]["snapshot_date"]
@@ -878,9 +824,10 @@ def get_guild_health(limit: int = 30):
         for m in ms:
             p_now = int(m.get("power") or 0)
             p_old = old_power.get(_nfc(m.get("nickname")))
-            if p_now > 0 and p_old:
+            observed = captured_time(m.get("captured_at"))
+            if p_now > 0 and p_old and observed and growth_base_date and observed.astimezone(_KST).date().isoformat() > growth_base_date:
                 grow.append(p_now / p_old - 1.0)
-        growth_ratio = (sum(1 for x in grow if x > 0.01) / len(grow)) if grow else None
+        growth_ratio = (sum(1 for x in grow if x >= 0.01) / len(grow)) if grow else None
         growth_median = sorted(grow)[len(grow) // 2] if grow else None
         out.append({
             **g,
@@ -915,6 +862,9 @@ def get_server_boss_ranking(kind: str = "guild_boss", limit: int = 100):
         return [{
             "serverRank": r.get("server_rank"),
             "nickname": r.get("nickname"),
+            "capturedAt": r.get("captured_at"),
+            "rankCapturedAt": r.get("rank_captured_at", r.get("captured_at")),
+            "statsSource": r.get("stats_source", "server"),
             "guild": r.get("guild"),
             "score": r.get("score"),
             "scoreText": r.get("score_text"),
@@ -954,78 +904,14 @@ FRIEND_GUILD_NAMES = ["친구들", "친구둘", "친구삼", "친구넷", "친�
 
 @app.get("/api/guild-dashboard")
 def get_guild_dashboard():
-    """친구패밀리 대시보드(홈 히어로/KPI/차트)용 통계 — 월별 성장 단위.
-    server_ranking_history(일별 스냅샷)에서 친구 길드 멤버를 집계.
-    반환: 이번 달 일별 전투력합 시계열·이번 달 성장률·어제 성장 인원·추적 인원·이번 달 성장 인원·월(N월)."""
-    cached = cache_get("guild_dashboard", 3600)
+    cached = cache_get("guild_dashboard", 300)
     if cached is not None:
         return cached
-    from collections import defaultdict
-    import unicodedata
-
-    def _nfc(s):
-        return unicodedata.normalize("NFC", str(s or "")).strip()
-
-    try:
-        today = datetime.now(KST).date()
-        month_start = today.replace(day=1)
-        cutoff = min(month_start, today - timedelta(days=8)).isoformat()  # 이번 달 + 어제(월초 대비) 커버
-        rows = (supabase.table("server_ranking_history")
-                .select("snapshot_date,name,power,guild")
-                .in_("guild", FRIEND_GUILD_NAMES)
-                .gte("snapshot_date", cutoff)
-                .execute().data) or []
-        # 실제 길드원 명단(members 테이블) — 서버랭킹의 미등록·이탈·부캐 제외용
-        member_rows = (supabase.table("members").select("name,guild").execute().data) or []
-    except Exception as e:
-        print(f"[guild-dashboard] {e}")
-        rows = []
-        member_rows = []
-        today = datetime.now(KST).date()
-        month_start = today.replace(day=1)
-
-    friend_set = {_nfc(g) for g in FRIEND_GUILD_NAMES}
-    roster_names = {_nfc(m.get("name")) for m in member_rows if _nfc(m.get("guild")) in friend_set}
-
-    member_days = defaultdict(dict)   # 이름 → {날짜: 전투력}
-    for r in rows:
-        d = r.get("snapshot_date"); nm = r.get("name")
-        if not d or not nm:
-            continue
-        if roster_names and _nfc(nm) not in roster_names:   # 공식 길드원만 집계
-            continue
-        member_days[nm][d] = int(r.get("power") or 0)
-
-    all_dates = sorted({d for dm in member_days.values() for d in dm})
-    result = {"series": [], "growthPct": 0.0, "growersYesterday": 0,
-              "totalMembers": 0, "growersMonth": 0, "monthLabel": f"{today.month}월",
-              "days": 0}
-
-    if len(all_dates) >= 1:
-        latest = all_dates[-1]
-        roster = [nm for nm, dm in member_days.items() if latest in dm]   # 현재 추적 멤버
-        result["totalMembers"] = len(roster)
-        # 어제 성장 인원 (최근 2개 스냅샷)
-        if len(all_dates) >= 2:
-            prev_day = all_dates[-2]
-            result["growersYesterday"] = sum(
-                1 for nm in roster
-                if prev_day in member_days[nm] and member_days[nm][latest] > member_days[nm][prev_day])
-        # 이번 달 성장 (월초 스냅샷 대비, 로스터 안정화)
-        ms = month_start.isoformat()
-        month_dates = [d for d in all_dates if d >= ms]
-        if len(month_dates) >= 2:
-            first, last = month_dates[0], month_dates[-1]
-            common = [nm for nm, dm in member_days.items() if last in dm and first in dm]
-            prev_sum = sum(member_days[nm][first] for nm in common)
-            cur_sum = sum(member_days[nm][last] for nm in common)
-            result["growthPct"] = round((cur_sum - prev_sum) / prev_sum * 100, 2) if prev_sum > 0 else 0.0
-            result["growersMonth"] = sum(1 for nm in common if member_days[nm][last] > member_days[nm][first])
-            result["series"] = [{"date": d, "total": sum(member_days[nm][d] for nm in common if d in member_days[nm])}
-                                for d in month_dates]
-            result["days"] = len(month_dates)
-
-    return cache_set("guild_dashboard", result)
+    today = datetime.now(KST).date()
+    members = fetch_members_raw()
+    since = min(today.replace(day=1), today-timedelta(days=8)).isoformat()
+    rows = load_family_history(members, since)
+    return cache_set("guild_dashboard", guild_dashboard(rows, members, today))
 
 
 # ── 컨텐츠 기록 (홈 '컨텐츠 기록' 섹션) ────────────────────────
@@ -1233,10 +1119,17 @@ def get_server_ranking(limit: int = 7000):
     """스카니아11 서버 전체 전투력 랭킹 (인기도 포함). 테이블 미생성 시 빈 배열."""
     try:
         # 무거운 6800행 읽기는 캐시 사용(데이터는 크롤때만 변경). PostgREST 1000행 캡은 로더가 우회.
-        out = load_server_ranking_rows(limit)
+        out = load_server_ranking_rows(max(1, min(limit, _SR_MAX)))
+        try:
+            out = current_server_rows(out, fetch_members_raw())
+        except Exception:
+            pass  # Keep the last full server snapshot if the roster service is unavailable.
         return [{
             "serverRank": r.get("server_rank"),
             "nickname": r.get("nickname"),
+            "capturedAt": r.get("captured_at"),
+            "rankCapturedAt": r.get("rank_captured_at", r.get("captured_at")),
+            "statsSource": r.get("stats_source", "server"),
             "guild": r.get("guild"),
             "power": r.get("power"),
             "powerText": r.get("power_text"),
@@ -1261,6 +1154,7 @@ def get_server_ranking_history(name: str, days: int = 90):
         res = (supabase.table("server_ranking_history")
                .select("snapshot_date,server_rank,power,popularity,guild")
                .eq("name", nm)
+               .gte("snapshot_date", (datetime.now(_KST).date()-timedelta(days=max(1, min(days,365))-1)).isoformat())
                .order("snapshot_date", desc=True)
                .limit(max(1, min(days, 365)))
                .execute())
@@ -1273,8 +1167,8 @@ def get_server_ranking_history(name: str, days: int = 90):
             "guild": r.get("guild"),
         } for r in rows]
     except Exception as e:
-        print(f"[server-ranking-history] {e}")
-        return []
+        print(f"[server-ranking-history] {type(e).__name__}")
+        raise HTTPException(status_code=503, detail="성장 이력을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
 
 # ══════════ 포인트/출석 시스템 ══════════

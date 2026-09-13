@@ -6,6 +6,7 @@ from fetch_mgf import fetch_mgf_data
 from transform import transform_data
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from guild_analytics import latest_members, captured_time
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -215,6 +216,21 @@ def save_monthly_snapshot(members: list[dict]):
         logger.info(f"[월간 스냅샷] {snapshot_month} 저장 완료: {len(rows)}명")
 
 
+def save_family_history(members):
+    """Hourly family observations must survive an unavailable full-server crawl."""
+    rows = []
+    for member in latest_members(members):
+        stamp = captured_time(member.get("captured_at"))
+        if not stamp or int(member.get("power") or 0) <= 0:
+            continue
+        rows.append({"snapshot_date": stamp.astimezone(KST).date().isoformat(),
+                     "name": member["name"], "guild": member.get("guild"),
+                     "power": member["power"], "popularity": member.get("popularity"),
+                     "server_rank": member.get("server_rank") or None})
+    if rows:
+        supabase.table("server_ranking_history").upsert(rows, on_conflict="snapshot_date,name").execute()
+
+
 def run_crawl():
     logger.info("=== 크롤링 시작 ===")
     try:
@@ -232,6 +248,11 @@ def run_crawl():
         # guild/job/level/power는 변경 이력 diff·닉변 감지용으로 같이 읽는다
         KEEP_COLS = ("pop_server_rank", "boss_score", "boss_rank", "wboss_score", "wboss_rank")
         existing = supabase.table("members").select("name,guild,job,level,power," + ",".join(KEEP_COLS)).execute()
+        # A failed/changed guild page must not remove that guild from the roster.
+        old_guilds = {m.get("guild") for m in (existing.data or []) if m.get("guild")}
+        new_guilds = {m.get("guild") for m in members if m.get("guild")}
+        if old_guilds - new_guilds:
+            raise ValueError("일부 길드 수집 결과 누락 — 이전 명단 보존")
         keep_map = {m["name"]: {c: m.get(c) for c in KEEP_COLS} for m in (existing.data or [])}
 
         # 새 데이터 insert 후 이전 행 삭제 — delete→insert 사이 API가 0명으로 응답하던 빈 창 제거.
@@ -252,7 +273,11 @@ def run_crawl():
         logger.info(f"=== 크롤링 완료: {len(members)}명 저장 ===")
         _record_changes(existing.data, members)
         _detect_rename_suspects(existing.data, members)
-        _invalidate_cache("home_summary", "monthly", "weekly_growth", "growth_story")
+        try:
+            save_family_history(members)
+        except Exception as error:
+            logger.warning("[길드 성장 이력] 저장 실패: %s", type(error).__name__)
+        _invalidate_cache("home_summary", "monthly", "weekly_growth", "growth_story", "guild_dashboard", "guild_health_*")
         _warm_home_caches()
         _track_job("크롤링", ok=bool(members), detail="mgf.gg 멤버 크롤 결과가 비어있어요.")
         return members
@@ -469,6 +494,15 @@ def run_server_top_update():
                 "power": r.get("power"),
                 "popularity": r.get("popularity"),
             } for r in rows]
+            from guild_analytics import current_server_rows
+            current_family = supabase.table("members").select("*").execute().data or []
+            combined = current_server_rows(rows, current_family)
+            by_name = {r.get("nickname"): r for r in combined}
+            for point in hist:
+                latest = by_name.get(point["name"], {})
+                if latest.get("stats_source") == "guild":
+                    point["power"] = latest["power"]
+                    point["guild"] = latest.get("guild")
             for i in range(0, len(hist), CHUNK):
                 supabase.table("server_ranking_history").upsert(
                     hist[i:i + CHUNK], on_conflict="snapshot_date,name"
@@ -476,6 +510,7 @@ def run_server_top_update():
             logger.info(f"[서버 이력] {today} {len(hist)}명 적립")
         except Exception as he:
             logger.warning(f"[서버 이력] 적립 스킵(테이블 미생성?): {repr(he)[:120]}")
+        _invalidate_cache("growth_story", "guild_dashboard", "weekly_growth", "guild_health_*")
         _track_job("서버 전체", ok=True)
     except Exception as e:
         logger.error(f"[서버 전체] 오류: {e}")
