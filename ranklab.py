@@ -29,7 +29,7 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/api/ranklab", tags=["ranklab"])
 
 # 워커 인증: RANKLAB_WORKER_TOKEN(전용 토큰) 우선, 없으면 SUPABASE_SERVICE_KEY 의 sha256
-_WORKER_KEY = (os.getenv("RANKLAB_WORKER_TOKEN") or "").strip() or hashlib.sha256((os.getenv("SUPABASE_SERVICE_KEY") or "").encode()).hexdigest()
+_WORKER_KEY = (os.getenv("RANKLAB_WORKER_TOKEN") or "").strip() or hashlib.sha256((os.getenv("SUPABASE_SERVICE_KEY") or "").strip().encode()).hexdigest()
 _JOBS: dict[str, dict] = {}
 _QUEUE: deque[str] = deque()
 _MAX_PENDING = 60
@@ -263,8 +263,8 @@ import threading
 
 import httpx
 
-_SB_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
-_SB_KEY = os.getenv("SUPABASE_SERVICE_KEY") or ""
+_SB_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+_SB_KEY = (os.getenv("SUPABASE_SERVICE_KEY") or "").strip()   # Railway 값 끝에 개행이 붙어 있던 사례 → strip 필수
 _BUCKET = "ranklab"
 _OBJECT = "demo/state.json"
 _STATE: dict = {"seq": 290000, "slots": [], "logs": [], "hidden": [], "version": 0}
@@ -287,7 +287,7 @@ def _ensure_bucket() -> None:
         httpx.post(f"{_SB_URL}/storage/v1/bucket", headers=_sb_headers({"content-type": "application/json"}),
                    json={"id": _BUCKET, "name": _BUCKET, "public": False}, timeout=10)
     except Exception as e:
-        print(f"[ranklab] bucket check failed: {e}")
+        print(f"[ranklab] bucket check failed: {type(e).__name__}")
 
 
 def _load_state() -> None:
@@ -304,7 +304,7 @@ def _load_state() -> None:
                 _STATE = {"seq": int(data.get("seq") or 290000), "slots": data["slots"], "logs": data.get("logs") or [], "hidden": data.get("hidden") or [], "version": int(data.get("version") or 0)}
                 print(f"[ranklab] state loaded: {len(_STATE['slots'])} slots")
     except Exception as e:
-        print(f"[ranklab] state load failed: {e}")
+        print(f"[ranklab] state load failed: {type(e).__name__}")
     _STATE_LOADED = True
 
 
@@ -318,7 +318,7 @@ def _save_state() -> None:
         if r.status_code >= 300:
             print(f"[ranklab] state save failed: {r.status_code} {r.text[:200]}")
     except Exception as e:
-        print(f"[ranklab] state save failed: {e}")
+        print(f"[ranklab] state save failed: {type(e).__name__}")
 
 
 class SlotIn(BaseModel):
