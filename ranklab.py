@@ -171,6 +171,10 @@ def worker_result(body: ResultIn, x_worker_key: Optional[str] = Header(default=N
     job["result"] = body.result
     job["error"] = body.error
     job["finished"] = time.time()
+    try:
+        _apply_result_to_slots(job)
+    except Exception as e:
+        print(f"[ranklab] apply result failed: {e}")
     return {"ok": True}
 
 
@@ -197,3 +201,172 @@ def recent(key: Optional[str] = None, limit: int = 30):
 def status():
     """워커 생존/큐 길이 (페이지가 '조회 서버 연결됨' 표시용)."""
     return {"worker_online": _LAST_CLAIM > 0 and (time.time() - _LAST_CLAIM) < 20, "pending": len(_QUEUE)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 공용 등록 목록(모든 사용자가 같은 화면) — Supabase Storage 의 JSON 파일에 저장
+#   버킷 ranklab(비공개) / demo/state.json = {"seq": int, "slots": [...], "logs": [...]}
+#   SQL 없이 서비스키만으로 동작. 백엔드 메모리에 캐시하고 변경 때마다 저장.
+# ══════════════════════════════════════════════════════════════════════
+import json
+import threading
+
+import httpx
+
+_SB_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+_SB_KEY = os.getenv("SUPABASE_SERVICE_KEY") or ""
+_BUCKET = "ranklab"
+_OBJECT = "demo/state.json"
+_STATE: dict = {"seq": 290000, "slots": [], "logs": [], "version": 0}
+_STATE_LOCK = threading.Lock()
+_STATE_LOADED = False
+
+
+def _sb_headers(extra: Optional[dict] = None) -> dict:
+    h = {"Authorization": f"Bearer {_SB_KEY}", "apikey": _SB_KEY}
+    if extra:
+        h.update(extra)
+    return h
+
+
+def _ensure_bucket() -> None:
+    try:
+        r = httpx.get(f"{_SB_URL}/storage/v1/bucket/{_BUCKET}", headers=_sb_headers(), timeout=10)
+        if r.status_code == 200:
+            return
+        httpx.post(f"{_SB_URL}/storage/v1/bucket", headers=_sb_headers({"content-type": "application/json"}),
+                   json={"id": _BUCKET, "name": _BUCKET, "public": False}, timeout=10)
+    except Exception as e:
+        print(f"[ranklab] bucket check failed: {e}")
+
+
+def _load_state() -> None:
+    global _STATE, _STATE_LOADED
+    if _STATE_LOADED or not _SB_URL or not _SB_KEY:
+        _STATE_LOADED = True
+        return
+    _ensure_bucket()
+    try:
+        r = httpx.get(f"{_SB_URL}/storage/v1/object/{_BUCKET}/{_OBJECT}", headers=_sb_headers(), timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, dict) and isinstance(data.get("slots"), list):
+                _STATE = {"seq": int(data.get("seq") or 290000), "slots": data["slots"], "logs": data.get("logs") or [], "version": int(data.get("version") or 0)}
+                print(f"[ranklab] state loaded: {len(_STATE['slots'])} slots")
+    except Exception as e:
+        print(f"[ranklab] state load failed: {e}")
+    _STATE_LOADED = True
+
+
+def _save_state() -> None:
+    if not _SB_URL or not _SB_KEY:
+        return
+    try:
+        body = json.dumps(_STATE, ensure_ascii=False).encode("utf-8")
+        r = httpx.post(f"{_SB_URL}/storage/v1/object/{_BUCKET}/{_OBJECT}",
+                       headers=_sb_headers({"content-type": "application/json", "x-upsert": "true"}), content=body, timeout=15)
+        if r.status_code >= 300:
+            print(f"[ranklab] state save failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[ranklab] state save failed: {e}")
+
+
+class SlotIn(BaseModel):
+    owner: str
+    kw: str
+    url: str = ""
+    days: int = 30
+    qty: int = 1
+    pid: str = ""
+    nvMid: str = ""
+    name: str = ""
+    mall: str = ""
+    catalog: bool = False
+    price: Optional[int] = None
+    review: Optional[int] = None
+    status: str = "wait"          # ok | err | wait
+    rank: Optional[int] = None
+    note: str = ""
+    jobId: Optional[str] = None
+    start: str = ""
+    end: str = ""
+
+
+def _kst_now() -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + 9 * 3600))
+
+
+@router.get("/state")
+def get_state():
+    """공용 등록 목록(모든 브라우저가 같은 화면)."""
+    with _STATE_LOCK:
+        _load_state()
+        return {"version": _STATE["version"], "slots": _STATE["slots"], "logs": _STATE["logs"]}
+
+
+@router.post("/slots")
+def add_slots(body: SlotIn, request: Request):
+    if not _rate_ok(_ip(request)):
+        raise HTTPException(status_code=429, detail="잠시 후 다시 시도해 주세요")
+    kw = re.sub(r"\s+", " ", body.kw.strip())
+    if not (1 <= len(kw) <= 40) or not body.owner.strip():
+        raise HTTPException(status_code=400, detail="키워드/광고주 확인")
+    qty = max(1, min(100, body.qty))
+    days = max(1, min(365, body.days))
+    with _STATE_LOCK:
+        _load_state()
+        created = []
+        for _ in range(qty):
+            _STATE["seq"] += 1
+            slot = body.model_dump()
+            slot.update({"no": _STATE["seq"], "kw": kw, "qty": 1, "days": days, "user": True,
+                         "live": bool(body.jobId), "history": ([{"d": body.start[:10] if body.start else "", "r": body.rank}] if body.rank is not None else []),
+                         "created": _kst_now()})
+            _STATE["slots"].insert(0, slot)
+            created.append(slot)
+        _STATE["logs"].insert(0, {"no": len(_STATE["logs"]) + 1, "kind": "new", "agency": "sm6974", "owner": body.owner, "qty": qty, "days": days,
+                                  "created": _kst_now(), "start": body.start, "desc": f"신규 등록 · {kw} · {body.name or (('스마트스토어 상품 ' + body.pid) if body.pid else ('가격비교 상품 ' + body.nvMid))}" + (f" × {qty}" if qty > 1 else ""),
+                                  "slot": created[-1]["no"], "user": True})
+        _STATE["version"] += 1
+        _save_state()
+        return {"version": _STATE["version"], "created": created}
+
+
+def _apply_result_to_slots(job: dict) -> None:
+    """워커 결과를 같은 jobId 의 공용 슬롯에 반영."""
+    r = job.get("result") or {}
+    with _STATE_LOCK:
+        _load_state()
+        changed = False
+        for s in _STATE["slots"]:
+            if s.get("jobId") != job["id"]:
+                continue
+            changed = True
+            if job["status"] == "done" and r:
+                found = bool(r.get("found"))
+                s.update({"name": r.get("name") or s.get("name"), "pid": r.get("pid") or s.get("pid") or "", "nvMid": r.get("nvMid") or s.get("nvMid") or "-",
+                          "mall": r.get("mall") or "-", "catalog": bool(r.get("catalog")), "price": r.get("price"), "review": r.get("review"),
+                          "url": r.get("url") or s.get("url"), "status": "ok" if found else "err", "rank": r.get("rank") if found else None,
+                          "history": ([{"d": (r.get("collectedAt") or "")[:10], "r": r.get("rank")}] if found else []),
+                          "note": "" if found else f"\"{s.get('kw')}\" 검색 결과 {int(r.get('rangeMax') or 1000):,}위({r.get('searchedPages')}페이지) 안에 없음",
+                          "live": False})
+            else:
+                s.update({"status": "wait", "live": False, "note": f"즉시 조회 실패: {job.get('error') or '알 수 없음'}",
+                          "name": s.get("name") if s.get("name") and not str(s.get("name")).startswith("조회 중") else (f"스마트스토어 상품 {s.get('pid')} (수집 대기)" if s.get("pid") else f"가격비교 상품 {s.get('nvMid')} (수집 대기)"),
+                          "mall": "다음 수집 시 자동 조회"})
+        if changed:
+            _STATE["version"] += 1
+            _save_state()
+
+
+@router.post("/reset")
+def reset_state(key: Optional[str] = None):
+    """공용 등록 목록 초기화(워커 토큰 필요)."""
+    _check_worker(key)
+    with _STATE_LOCK:
+        _load_state()
+        _STATE["slots"] = []
+        _STATE["logs"] = []
+        _STATE["version"] += 1
+        _save_state()
+    return {"ok": True}
