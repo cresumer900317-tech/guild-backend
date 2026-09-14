@@ -140,6 +140,11 @@ def worker_claim(x_worker_key: Optional[str] = Header(default=None)):
     _check_worker(x_worker_key)
     _LAST_CLAIM = time.time()
     _gc()
+    if not _QUEUE:
+        try:
+            _enqueue_retry()
+        except Exception as e:
+            print(f"[ranklab] retry enqueue failed: {e}")
     while _QUEUE:
         jid = _QUEUE.popleft()
         job = _JOBS.get(jid)
@@ -149,6 +154,51 @@ def worker_claim(x_worker_key: Optional[str] = Header(default=None)):
             job["started"] = time.time()
             return {k: job[k] for k in ("id", "url", "keyword", "pages", "pid", "catalogId")}
     return Response(status_code=204)
+
+
+# ── 미완성 항목 자동 재확인 ───────────────────────────────────────
+# 상품명·MID 를 못 찾았거나 즉시 조회가 실패한 슬롯은 30분 간격으로 최대 3회 다시 조회한다.
+# 워커가 놀고 있을 때만 1건씩 큐에 넣으므로 사용자 등록이 항상 우선. 메모리 부담은 슬롯당 두 필드(tries, lastTry)뿐.
+_RETRY_AFTER = 30 * 60
+_RETRY_MAX = 3
+
+
+def _needs_retry(s: dict) -> bool:
+    if not s.get("user") or s.get("live") or not s.get("url") or not _NAVER_URL.match(s.get("url") or "") or not _PID.search(s.get("url") or ""):
+        return False
+    if int(s.get("tries") or 0) >= _RETRY_MAX:
+        return False
+    if s.get("status") == "wait":
+        return True
+    name = str(s.get("name") or "")
+    mid = str(s.get("nvMid") or "")
+    return s.get("status") in ("ok", "err") and (not name or name.startswith("조회 중") or "(수집 대기)" in name or mid in ("", "-"))
+
+
+def _enqueue_retry() -> None:
+    now = time.time()
+    with _STATE_LOCK:
+        _load_state()
+        cands = [s for s in _STATE["slots"] if _needs_retry(s) and now - float(s.get("lastTry") or 0) > _RETRY_AFTER]
+        if not cands:
+            return
+        # 같은 url+키워드는 한 작업으로 묶는다
+        first = cands[0]
+        group = [s for s in cands if s.get("url") == first.get("url") and s.get("kw") == first.get("kw")]
+        m = _PID.search(first["url"])
+        jid = secrets.token_hex(8)
+        _JOBS[jid] = {
+            "id": jid, "status": "queued", "step": "자동 재확인 대기", "created": now,
+            "url": first["url"], "keyword": first["kw"], "pages": 13,
+            "pid": (m.group(1) or "") if m else "", "catalogId": (m.group(2) or "") if m else "", "result": None, "error": None, "retry": True,
+        }
+        _QUEUE.append(jid)
+        for s in group:
+            s.update({"jobId": jid, "live": True, "tries": int(s.get("tries") or 0) + 1, "lastTry": now,
+                      "note": f"자동 재확인 {int(s.get('tries') or 0) + 1}/{_RETRY_MAX} 진행 중"})
+        _STATE["version"] += 1
+        _save_state()
+        print(f"[ranklab] retry enqueued {jid} for {len(group)} slot(s): {first['kw']}")
 
 
 @router.post("/worker/progress")
@@ -319,7 +369,7 @@ def add_slots(body: SlotIn, request: Request):
         for _ in range(qty):
             _STATE["seq"] += 1
             slot = body.model_dump()
-            slot.update({"no": _STATE["seq"], "kw": kw, "qty": 1, "days": days, "user": True,
+            slot.update({"no": _STATE["seq"], "kw": kw, "qty": 1, "days": days, "user": True, "tries": 0, "lastTry": time.time(),
                          "live": bool(body.jobId), "history": ([{"d": body.start[:10] if body.start else "", "r": body.rank}] if body.rank is not None else []),
                          "created": _kst_now()})
             _STATE["slots"].insert(0, slot)
