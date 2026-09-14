@@ -32,10 +32,10 @@ router = APIRouter(prefix="/api/ranklab", tags=["ranklab"])
 _WORKER_KEY = (os.getenv("RANKLAB_WORKER_TOKEN") or "").strip() or hashlib.sha256((os.getenv("SUPABASE_SERVICE_KEY") or "").encode()).hexdigest()
 _JOBS: dict[str, dict] = {}
 _QUEUE: deque[str] = deque()
-_MAX_PENDING = 20
-_JOB_TTL = 60 * 30
+_MAX_PENDING = 60
+_JOB_TTL = 60 * 60
 _RATE: dict[str, deque] = {}
-_RATE_PER_MIN = 6
+_RATE_PER_MIN = 10
 _NAVER_URL = re.compile(r"^https://([a-z0-9-]+\.)*naver\.com/[^\s]+$", re.I)
 _PID = re.compile(r"/(?:window-)?products/(?:[^/?#]+/)?(\d+)|/catalog/(\d+)")   # 상품 상세 또는 가격비교(카탈로그)
 
