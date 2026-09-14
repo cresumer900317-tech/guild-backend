@@ -267,7 +267,7 @@ _SB_URL = (os.getenv("SUPABASE_URL") or "").rstrip("/")
 _SB_KEY = os.getenv("SUPABASE_SERVICE_KEY") or ""
 _BUCKET = "ranklab"
 _OBJECT = "demo/state.json"
-_STATE: dict = {"seq": 290000, "slots": [], "logs": [], "version": 0}
+_STATE: dict = {"seq": 290000, "slots": [], "logs": [], "hidden": [], "version": 0}
 _STATE_LOCK = threading.Lock()
 _STATE_LOADED = False
 
@@ -301,7 +301,7 @@ def _load_state() -> None:
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, dict) and isinstance(data.get("slots"), list):
-                _STATE = {"seq": int(data.get("seq") or 290000), "slots": data["slots"], "logs": data.get("logs") or [], "version": int(data.get("version") or 0)}
+                _STATE = {"seq": int(data.get("seq") or 290000), "slots": data["slots"], "logs": data.get("logs") or [], "hidden": data.get("hidden") or [], "version": int(data.get("version") or 0)}
                 print(f"[ranklab] state loaded: {len(_STATE['slots'])} slots")
     except Exception as e:
         print(f"[ranklab] state load failed: {e}")
@@ -351,7 +351,7 @@ def get_state():
     """공용 등록 목록(모든 브라우저가 같은 화면)."""
     with _STATE_LOCK:
         _load_state()
-        return {"version": _STATE["version"], "slots": _STATE["slots"], "logs": _STATE["logs"]}
+        return {"version": _STATE["version"], "slots": _STATE["slots"], "logs": _STATE["logs"], "hidden": _STATE.get("hidden") or []}
 
 
 @router.post("/slots")
@@ -417,6 +417,33 @@ def reset_state(key: Optional[str] = None):
         _load_state()
         _STATE["slots"] = []
         _STATE["logs"] = []
+        _STATE["hidden"] = []
         _STATE["version"] += 1
         _save_state()
     return {"ok": True}
+
+
+class DeleteIn(BaseModel):
+    nos: list[int]
+
+
+@router.post("/slots/delete")
+def delete_slots(body: DeleteIn, request: Request):
+    """선택 삭제. 등록 슬롯은 제거, 기본 데모 슬롯(281xxx)은 숨김 목록에 넣어 모든 화면에서 사라지게 한다."""
+    if not _rate_ok(_ip(request)):
+        raise HTTPException(status_code=429, detail="잠시 후 다시 시도해 주세요")
+    nos = set(int(n) for n in body.nos[:500])
+    if not nos:
+        return {"ok": True, "deleted": 0}
+    with _STATE_LOCK:
+        _load_state()
+        before = len(_STATE["slots"])
+        _STATE["slots"] = [x for x in _STATE["slots"] if int(x.get("no") or 0) not in nos]
+        removed = before - len(_STATE["slots"])
+        user_nos = {int(x.get("no") or 0) for x in _STATE["slots"]}
+        hidden = set(int(h) for h in (_STATE.get("hidden") or []))
+        hidden |= {n for n in nos if n not in user_nos}
+        _STATE["hidden"] = sorted(hidden)
+        _STATE["version"] += 1
+        _save_state()
+        return {"ok": True, "deleted": removed, "hidden": len(_STATE["hidden"]), "version": _STATE["version"]}
