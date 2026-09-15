@@ -206,8 +206,10 @@ def _enqueue_daily(force: bool = False) -> int:
     now = time.time()
     with _STATE_LOCK:
         _load_state()
-        if not _STATE_LOADED or (not force and not _daily_due()):
+        due = _daily_due()
+        if not _STATE_LOADED or (not force and not due):
             return 0
+        prev = dict(_STATE.get("daily") or {})
         groups: dict[tuple, list] = {}
         for s in _STATE["slots"]:
             url, kw = str(s.get("url") or ""), str(s.get("kw") or "")
@@ -227,7 +229,9 @@ def _enqueue_daily(force: bool = False) -> int:
                 _DAILY_QUEUE.append(jid)
             for s in slots:
                 s.update({"jobId": jid, "live": True, "lastTry": now, "note": "일일 갱신 중"})
-        _STATE["daily"] = {"lastRunDate": _kst_date(), "startedAt": _kst_now(), "queued": len(items), "done": 0, "failed": 0, "forced": bool(force)}
+        # 수동(force) 실행이 정기 실행 전(11시 이전)이면 오늘의 정기 실행은 그대로 남겨 둔다
+        _STATE["daily"] = {"lastRunDate": _kst_date() if due else prev.get("lastRunDate"), "startedAt": _kst_now(),
+                           "queued": len(items), "done": 0, "failed": 0, "forced": bool(force) and not due}
         _STATE["version"] += 1
         _save_state()
         print(f"[ranklab] daily refresh enqueued: {len(items)} group(s), force={force}")
