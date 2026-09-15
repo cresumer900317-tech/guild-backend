@@ -178,6 +178,8 @@ def worker_claim(x_worker_key: Optional[str] = Header(default=None)):
             job["started"] = time.time()
             out = {k: job[k] for k in ("id", "url", "keyword", "pages", "pid", "catalogId")}
             out["kind"] = job.get("kind") or "user"
+            if job.get("targets") is not None:
+                out["targets"] = job["targets"]
             return out
     return Response(status_code=204)
 
@@ -210,24 +212,31 @@ def _enqueue_daily(force: bool = False) -> int:
         if not _STATE_LOADED or (not force and not due):
             return 0
         prev = dict(_STATE.get("daily") or {})
-        groups: dict[tuple, list] = {}
+        # 키워드 단위로 묶는다: 검색 결과 한 페이지(80개)에 그 키워드의 상품이 모두 나오므로 키워드당 검색 1회로 등록 상품 전부를 찾는다.
+        # 대상 식별자(상품ID·단일MID·묶음MID)가 하나도 없는 슬롯은 제외(수집 대기 슬롯은 기존 자동 재확인이 상품 페이지부터 처리).
+        groups: dict[str, list] = {}
         for s in _STATE["slots"]:
             url, kw = str(s.get("url") or ""), str(s.get("kw") or "")
-            if not s.get("user") or s.get("live") or not url or not kw or not _NAVER_URL.match(url) or not _PID.search(url):
+            if not s.get("user") or s.get("live") or not kw or (url and not _NAVER_URL.match(url)):
                 continue
-            groups.setdefault((url, kw), []).append(s)
+            m = _PID.search(url) if url else None
+            pid = str(s.get("pid") or "") or ((m.group(1) or "") if m else "")
+            nv = str(s.get("nvMid") or "")
+            cat = ((m.group(2) or "") if m else "") or (nv if s.get("catalog") else "")
+            if not pid and nv in ("", "-") and not cat:
+                continue
+            groups.setdefault(kw, []).append((s, {"key": str(s.get("no")), "pid": pid, "nvMid": "" if nv == "-" else nv, "catalogId": cat}))
         items = list(groups.items())[:_DAILY_MAX_GROUPS]
-        for (url, kw), slots in items:
-            m = _PID.search(url)
+        for kw, pairs in items:
             jid = secrets.token_hex(8)
             _JOBS[jid] = {
                 "id": jid, "status": "queued", "step": "일일 갱신 대기", "created": now, "kind": "daily",
-                "url": url, "keyword": kw, "pages": 13,
-                "pid": (m.group(1) or "") if m else "", "catalogId": (m.group(2) or "") if m else "", "result": None, "error": None,
+                "url": str(pairs[0][0].get("url") or ""), "keyword": kw, "pages": 13, "pid": "", "catalogId": "",
+                "targets": [t for _, t in pairs], "result": None, "error": None,
             }
             with _JOB_LOCK:
                 _DAILY_QUEUE.append(jid)
-            for s in slots:
+            for s, _ in pairs:
                 s.update({"jobId": jid, "live": True, "lastTry": now, "note": "일일 갱신 중"})
         # 수동(force) 실행이 정기 실행 전(11시 이전)이면 오늘의 정기 실행은 그대로 남겨 둔다
         _STATE["daily"] = {"lastRunDate": _kst_date() if due else prev.get("lastRunDate"), "startedAt": _kst_now(),
@@ -558,10 +567,28 @@ def _apply_result_to_slots(job: dict) -> None:
         _load_state()
         changed = False
         daily = job.get("kind") == "daily"
+        by_key = {str(x.get("key")): x for x in (r.get("results") or [])} if daily else {}
         for s in _STATE["slots"]:
             if s.get("jobId") != job["id"]:
                 continue
             changed = True
+            if daily and job["status"] == "done" and r:
+                x = by_key.get(str(s.get("no")))
+                day = (r.get("collectedAt") or "")[:10] or _kst_date()
+                hist = [h for h in (s.get("history") or []) if isinstance(h, dict) and h.get("r") is not None and h.get("d") != day]
+                if x and x.get("found"):
+                    hist.append({"d": day, "r": x.get("rank")})
+                    s.update({"status": "ok", "rank": x.get("rank"), "note": "", "nvMid": x.get("nvMid") or s.get("nvMid") or "-",
+                              "price": x.get("price") if x.get("price") is not None else s.get("price"), "review": x.get("review") if x.get("review") is not None else s.get("review")})
+                    if x.get("title") and (not s.get("name") or "(수집 대기)" in str(s.get("name"))):
+                        s["name"] = x["title"]
+                elif x:
+                    s.update({"status": "err", "rank": None,
+                              "note": f"\"{s.get('kw')}\" 검색 결과 {int(r.get('rangeMax') or 1000):,}위({r.get('searchedPages')}페이지) 안에 없음"})
+                else:
+                    s["note"] = ""   # 대상에서 빠진 슬롯(식별자 없음)
+                s.update({"history": hist[-90:], "live": False, "lastChecked": _kst_now()})
+                continue
             if job["status"] == "done" and r:
                 found = bool(r.get("found"))
                 day = (r.get("collectedAt") or "")[:10] or _kst_date()
