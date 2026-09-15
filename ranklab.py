@@ -8,6 +8,12 @@
   GET  /api/ranklab/worker/claim      (X-Worker-Key)            → 다음 대기 작업 1건 또는 204
   POST /api/ranklab/worker/progress   (X-Worker-Key) {id, step}
   POST /api/ranklab/worker/result     (X-Worker-Key) {id, ok, result|error}
+  GET  /api/ranklab/daily                                       → 일일 갱신 상태
+  POST /api/ranklab/daily/run?key=&force=  (워커 토큰)          → 일일 갱신 수동 시작
+
+일일 갱신: 매일 11:00(KST) 이후 워커가 처음 큐를 비운 시점에 등록 슬롯 전체를 (url, 키워드) 단위로 묶어 다시 조회한다.
+스케줄러 스레드 없이 워커의 claim 폴링(3초)에서 판단하므로 워커 PC가 꺼져 있던 날은 켜지는 즉시 그날 분을 한 번 돌린다.
+'오늘 이미 돌았는지'는 Storage 의 state.json(daily.lastRunDate)에 남겨 재배포 후에도 중복 실행하지 않는다.
 
 워커 인증: SUPABASE_SERVICE_KEY 의 sha256 (백엔드·워커 PC 둘 다 같은 키를 이미 갖고 있어 새 비밀 불필요).
 """
@@ -79,13 +85,14 @@ def _rate_ok(ip: str) -> bool:
 def _gc() -> None:
     now = time.time()
     with _JOB_LOCK:
-        expired = [j for j, v in list(_JOBS.items()) if now - v["created"] > _JOB_TTL]
+        expired = [j for j, v in list(_JOBS.items()) if now - v["created"] > (_JOB_TTL * 6 if v.get("kind") == "daily" else _JOB_TTL)]
         for jid in expired:
             _JOBS.pop(jid, None)
-            try:
-                _QUEUE.remove(jid)
-            except ValueError:
-                pass
+            for q in (_QUEUE, _DAILY_QUEUE):
+                try:
+                    q.remove(jid)
+                except ValueError:
+                    pass
     if expired:
         _release_orphans(set(expired))
 
@@ -102,8 +109,9 @@ def _public(job: dict) -> dict:
     if job.get("error"):
         out["error"] = job["error"]
     with _JOB_LOCK:
-        q = list(_QUEUE)
+        q = list(_DAILY_QUEUE) if job.get("kind") == "daily" else list(_QUEUE)
     out["queue_position"] = (q.index(job["id"]) + 1) if job["id"] in q else 0
+    out["kind"] = job.get("kind") or "user"
     out["worker_seen"] = _LAST_CLAIM > 0 and (time.time() - _LAST_CLAIM) < 20
     return out
 
@@ -149,23 +157,98 @@ def worker_claim(x_worker_key: Optional[str] = Header(default=None)):
     _check_worker(x_worker_key)
     _LAST_CLAIM = time.time()
     _gc()
-    if not _QUEUE:
+    if not _QUEUE and not _DAILY_QUEUE:
         try:
-            _enqueue_retry()
+            if not _enqueue_daily():
+                _enqueue_retry()
         except Exception as e:
-            print(f"[ranklab] retry enqueue failed: {e}")
+            print(f"[ranklab] daily/retry enqueue failed: {e}")
     while True:
         with _JOB_LOCK:
-            if not _QUEUE:
+            if _QUEUE:
+                jid = _QUEUE.popleft()
+            elif _DAILY_QUEUE:
+                jid = _DAILY_QUEUE.popleft()
+            else:
                 break
-            jid = _QUEUE.popleft()
             job = _JOBS.get(jid)
         if job and job["status"] == "queued":
             job["status"] = "running"
             job["step"] = "상품 페이지 여는 중"
             job["started"] = time.time()
-            return {k: job[k] for k in ("id", "url", "keyword", "pages", "pid", "catalogId")}
+            out = {k: job[k] for k in ("id", "url", "keyword", "pages", "pid", "catalogId")}
+            out["kind"] = job.get("kind") or "user"
+            return out
     return Response(status_code=204)
+
+
+# ── 일일 갱신(매일 11:00 KST) ─────────────────────────────────────
+_DAILY_HOUR = 11
+_DAILY_QUEUE: deque[str] = deque()
+_DAILY_MAX_GROUPS = 500
+
+
+def _kst_date(ts: Optional[float] = None) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime((ts or time.time()) + 9 * 3600))
+
+
+def _kst_hour() -> int:
+    return int(time.strftime("%H", time.localtime(time.time() + 9 * 3600)))
+
+
+def _daily_due() -> bool:
+    d = _STATE.get("daily") or {}
+    return _kst_hour() >= _DAILY_HOUR and d.get("lastRunDate") != _kst_date()
+
+
+def _enqueue_daily(force: bool = False) -> int:
+    """등록 슬롯 전체를 (url, 키워드) 묶음으로 일일 갱신 큐에 넣는다. 오늘 이미 돌았으면 0. 반환=묶음 수."""
+    now = time.time()
+    with _STATE_LOCK:
+        _load_state()
+        if not _STATE_LOADED or (not force and not _daily_due()):
+            return 0
+        groups: dict[tuple, list] = {}
+        for s in _STATE["slots"]:
+            url, kw = str(s.get("url") or ""), str(s.get("kw") or "")
+            if not s.get("user") or s.get("live") or not url or not kw or not _NAVER_URL.match(url) or not _PID.search(url):
+                continue
+            groups.setdefault((url, kw), []).append(s)
+        items = list(groups.items())[:_DAILY_MAX_GROUPS]
+        for (url, kw), slots in items:
+            m = _PID.search(url)
+            jid = secrets.token_hex(8)
+            _JOBS[jid] = {
+                "id": jid, "status": "queued", "step": "일일 갱신 대기", "created": now, "kind": "daily",
+                "url": url, "keyword": kw, "pages": 13,
+                "pid": (m.group(1) or "") if m else "", "catalogId": (m.group(2) or "") if m else "", "result": None, "error": None,
+            }
+            with _JOB_LOCK:
+                _DAILY_QUEUE.append(jid)
+            for s in slots:
+                s.update({"jobId": jid, "live": True, "lastTry": now, "note": "일일 갱신 중"})
+        _STATE["daily"] = {"lastRunDate": _kst_date(), "startedAt": _kst_now(), "queued": len(items), "done": 0, "failed": 0, "forced": bool(force)}
+        _STATE["version"] += 1
+        _save_state()
+        print(f"[ranklab] daily refresh enqueued: {len(items)} group(s), force={force}")
+        return len(items)
+
+
+@router.get("/daily")
+def daily_status():
+    """일일 갱신 상태(마지막 실행일·진행 수)와 다음 실행 조건."""
+    with _STATE_LOCK:
+        _load_state()
+        d = dict(_STATE.get("daily") or {})
+    return {"daily": d, "due_now": _daily_due(), "pending_daily": len(_DAILY_QUEUE), "hour_kst": _kst_hour(), "run_at": f"{_DAILY_HOUR:02d}:00 KST"}
+
+
+@router.post("/daily/run")
+def daily_run(key: Optional[str] = None, force: int = 0, x_worker_key: Optional[str] = Header(default=None)):
+    """수동 시작(워커 토큰). force=1 이면 오늘 이미 돌았어도 다시 돈다."""
+    _check_worker(x_worker_key or key)
+    n = _enqueue_daily(force=bool(force))
+    return {"ok": True, "queued_groups": n, "daily": _STATE.get("daily")}
 
 
 # ── 미완성 항목 자동 재확인 ───────────────────────────────────────
@@ -180,7 +263,7 @@ def _needs_retry(s: dict) -> bool:
         return False
     if int(s.get("tries") or 0) >= _RETRY_MAX:
         if s.get("status") == "wait" and not str(s.get("note") or "").startswith("자동 재확인 종료"):
-            s["note"] = f"자동 재확인 종료({_RETRY_MAX}회 실패) · 다음 수집(11:00)에서 다시 확인"
+            s["note"] = f"자동 재확인 종료({_RETRY_MAX}회 실패) · 다음 일일 갱신(11:00)에서 다시 확인"
         return False
     if s.get("status") == "wait":
         return True
@@ -282,7 +365,7 @@ _SB_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 _SB_KEY = (os.getenv("SUPABASE_SERVICE_KEY") or "").strip()   # Railway 값 끝에 개행이 붙어 있던 사례 → strip 필수
 _BUCKET = "ranklab"
 _OBJECT = "demo/state.json"
-_STATE: dict = {"seq": 290000, "slots": [], "logs": [], "hidden": [], "version": 0}
+_STATE: dict = {"seq": 290000, "slots": [], "logs": [], "hidden": [], "version": 0, "daily": {}}
 _STATE_LOCK = threading.Lock()
 _STATE_LOADED = False
 
@@ -323,7 +406,7 @@ def _load_state() -> None:
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, dict) and isinstance(data.get("slots"), list):
-                _STATE = {"seq": int(data.get("seq") or 290000), "slots": data["slots"], "logs": data.get("logs") or [], "hidden": data.get("hidden") or [], "version": int(data.get("version") or 0)}
+                _STATE = {"seq": int(data.get("seq") or 290000), "slots": data["slots"], "logs": data.get("logs") or [], "hidden": data.get("hidden") or [], "version": int(data.get("version") or 0), "daily": data.get("daily") or {}}
                 _STATE_LOADED = True
                 _release_orphans(set())
                 print(f"[ranklab] state loaded: {len(_STATE['slots'])} slots")
@@ -348,6 +431,8 @@ def _release_orphans(dead_jobs: set) -> None:
         jid = s.get("jobId")
         if s.get("live") and jid and (jid in dead_jobs or jid not in _JOBS):
             s.update({"live": False, "jobId": None})
+            if str(s.get("note") or "") == "일일 갱신 중":
+                s["note"] = ""
             if s.get("status") == "wait" or s.get("rank") is None and s.get("status") != "err":
                 s["status"] = "wait"
                 s["note"] = "조회가 중단되어 자동 재확인 대기 중"
@@ -417,7 +502,7 @@ def get_state():
         _load_state()
         if _DIRTY:
             _save_state()   # 지난 저장 실패분 재시도
-        return {"version": _STATE["version"], "slots": _STATE["slots"], "logs": _STATE["logs"], "hidden": _STATE.get("hidden") or [], "loaded": _STATE_LOADED, "persisted": not _DIRTY}
+        return {"version": _STATE["version"], "slots": _STATE["slots"], "logs": _STATE["logs"], "hidden": _STATE.get("hidden") or [], "loaded": _STATE_LOADED, "persisted": not _DIRTY, "daily": _STATE.get("daily") or {}}
 
 
 @router.post("/slots")
@@ -468,18 +553,25 @@ def _apply_result_to_slots(job: dict) -> None:
     with _STATE_LOCK:
         _load_state()
         changed = False
+        daily = job.get("kind") == "daily"
         for s in _STATE["slots"]:
             if s.get("jobId") != job["id"]:
                 continue
             changed = True
             if job["status"] == "done" and r:
                 found = bool(r.get("found"))
+                day = (r.get("collectedAt") or "")[:10] or _kst_date()
+                hist = [h for h in (s.get("history") or []) if isinstance(h, dict) and h.get("r") is not None and h.get("d") != day]
+                if found:
+                    hist.append({"d": day, "r": r.get("rank")})
                 s.update({"name": r.get("name") or s.get("name"), "pid": r.get("pid") or s.get("pid") or "", "nvMid": r.get("nvMid") or s.get("nvMid") or "-",
                           "mall": r.get("mall") or "-", "catalog": bool(r.get("catalog")), "price": r.get("price"), "review": r.get("review"),
                           "url": r.get("url") or s.get("url"), "status": "ok" if found else "err", "rank": r.get("rank") if found else None,
-                          "history": ([{"d": (r.get("collectedAt") or "")[:10], "r": r.get("rank")}] if found else []),
+                          "history": hist[-90:],
                           "note": "" if found else f"\"{s.get('kw')}\" 검색 결과 {int(r.get('rangeMax') or 1000):,}위({r.get('searchedPages')}페이지) 안에 없음",
-                          "live": False})
+                          "live": False, "lastChecked": _kst_now()})
+            elif daily:
+                s.update({"live": False, "note": f"일일 갱신 실패({_kst_now()}): {job.get('error') or '알 수 없음'} · 이전 순위 유지"})
             else:
                 has_name = bool(s.get("name")) and not str(s.get("name")).startswith("조회 중")
                 s.update({"live": False, "note": f"즉시 조회 실패: {job.get('error') or '알 수 없음'}"})
@@ -489,6 +581,10 @@ def _apply_result_to_slots(job: dict) -> None:
                     s["name"] = f"스마트스토어 상품 {s.get('pid')} (수집 대기)" if s.get("pid") else f"가격비교 상품 {s.get('nvMid')} (수집 대기)"
                     s["mall"] = "다음 수집 시 자동 조회"
         if changed:
+            if daily:
+                d = _STATE.setdefault("daily", {})
+                d["done" if job["status"] == "done" else "failed"] = int(d.get("done" if job["status"] == "done" else "failed") or 0) + 1
+                d["lastFinishedAt"] = _kst_now()
             _STATE["version"] += 1
             _save_state()
 
