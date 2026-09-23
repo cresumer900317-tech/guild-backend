@@ -580,7 +580,7 @@ def _apply_result_to_slots(job: dict) -> None:
                     hist.append({"d": day, "r": x.get("rank")})
                     s.update({"status": "ok", "rank": x.get("rank"), "note": "", "nvMid": x.get("nvMid") or s.get("nvMid") or "-",
                               "price": x.get("price") if x.get("price") is not None else s.get("price"), "review": x.get("review") if x.get("review") is not None else s.get("review")})
-                    if x.get("title") and (not s.get("name") or "(수집 대기)" in str(s.get("name"))):
+                    if x.get("title") and (not s.get("name") or "(수집 대기)" in str(s.get("name")) or "(조회 대기)" in str(s.get("name")) or str(s.get("name")).startswith("조회 중")):
                         s["name"] = x["title"]
                 elif x:
                     s.update({"status": "err", "rank": None,
