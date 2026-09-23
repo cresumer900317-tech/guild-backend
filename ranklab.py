@@ -440,6 +440,7 @@ def _require_loaded() -> None:
 def _release_orphans(dead_jobs: set) -> None:
     """재시작·작업 만료로 _JOBS 에 없는 jobId 를 가진 '조회중' 슬롯을 재시도 가능 상태로 되돌린다."""
     changed = False
+    released: list = []
     for s in _STATE["slots"]:
         jid = s.get("jobId")
         if s.get("live") and jid and (jid in dead_jobs or jid not in _JOBS):
@@ -451,6 +452,36 @@ def _release_orphans(dead_jobs: set) -> None:
                 s["note"] = "조회가 중단되어 자동 재확인 대기 중"
                 s["lastTry"] = 0   # 다음 유휴 때 바로 재확인
             changed = True
+            released.append(s)
+    # 서버 재시작·만료로 끊긴 건은 키워드 묶음(일일 갱신 방식)으로 바로 다시 큐에 넣어 이어서 수집한다(한 건씩 도는 30분 재확인보다 훨씬 빠름)
+    groups: dict = {}
+    for s in released:
+        url, kw = str(s.get("url") or ""), str(s.get("kw") or "")
+        if not kw or not url or not _NAVER_URL.match(url):
+            continue
+        m = _PID.search(url)
+        pid = str(s.get("pid") or "") or ((m.group(1) or "") if m else "")
+        nv = str(s.get("nvMid") or "")
+        cat = ((m.group(2) or "") if m else "") or (nv if s.get("catalog") else "")
+        if not pid and nv in ("", "-") and not cat:
+            continue
+        groups.setdefault(kw, []).append((s, {"key": str(s.get("no")), "pid": pid, "nvMid": "" if nv == "-" else nv, "catalogId": cat}))
+    now = time.time()
+    for kw, pairs in groups.items():
+        jid = secrets.token_hex(8)
+        _JOBS[jid] = {
+            "id": jid, "status": "queued", "step": "조회 재개 대기", "created": now, "kind": "daily", "resume": True,
+            "url": str(pairs[0][0].get("url") or ""), "keyword": kw, "pages": 13, "pid": "", "catalogId": "",
+            "targets": [t for _, t in pairs], "result": None, "error": None,
+        }
+        with _JOB_LOCK:
+            _DAILY_QUEUE.append(jid)
+        for s, _ in pairs:
+            s.update({"jobId": jid, "live": True, "lastTry": now, "note": "조회 재개 중"})
+    if groups:
+        d = _STATE.setdefault("daily", {})
+        d.update({"startedAt": _kst_now(), "queued": len(groups), "done": 0, "failed": 0, "forced": True, "resume": True})
+        print(f"[ranklab] resumed {len(groups)} keyword group(s) after restart/expiry")
     if changed:
         _STATE["version"] += 1
         _save_state()
