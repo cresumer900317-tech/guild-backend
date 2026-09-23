@@ -705,3 +705,100 @@ def recheck_slots(body: RecheckIn, request: Request):
         _STATE["version"] += 1
         _save_state()
     return {"ok": True, "queued": queued, "jobs": len(groups)}
+
+
+# ── 엑셀/CSV 일괄 등록 ─────────────────────────────────────────────
+class BulkRow(BaseModel):
+    owner: str = Field(default="", max_length=40)
+    kw: str = Field(default="", max_length=60)
+    url: str = Field(default="", max_length=600)
+    qty: int = 1
+    days: int = 30
+
+
+class BulkIn(BaseModel):
+    rows: list[BulkRow] = Field(max_length=500)
+    pages: int = 13
+
+
+@router.post("/slots/bulk")
+def add_slots_bulk(body: BulkIn, request: Request):
+    """일괄 등록: 슬롯을 '조회 대기'로 만들고, 키워드 묶음 조회 작업(일일 갱신과 같은 방식·키워드당 검색 1회)을 바로 큐에 넣는다.
+    사용자 등록 큐가 우선이므로 개별 등록을 막지 않는다."""
+    _gc()
+    if not _rate_ok(_ip(request)):
+        raise HTTPException(status_code=429, detail="잠시 후 다시 시도해 주세요")
+    pages = max(1, min(13, int(body.pages or 13)))
+    now = time.time()
+    today = _kst_date()
+    y, m, d = (int(x) for x in today.split("-"))
+    import datetime as _dt
+    base = _dt.date(y, m, d) + _dt.timedelta(days=1)
+    created, errors = [], []
+    groups: dict = {}
+    with _STATE_LOCK:
+        _require_loaded()
+        total_qty = sum(max(1, min(100, int(r.qty or 1))) for r in body.rows)
+        if len(_STATE["slots"]) + total_qty > _MAX_SLOTS:
+            raise HTTPException(status_code=507, detail=f"등록 상한({_MAX_SLOTS})을 넘습니다")
+        for i, r in enumerate(body.rows):
+            kw = re.sub(r"\s+", " ", (r.kw or "").strip())
+            url = (r.url or "").strip().split("#", 1)[0]
+            owner = (r.owner or "").strip()
+            m2 = _PID.search(url) if url else None
+            if not owner:
+                errors.append({"row": i + 1, "reason": "광고주 ID 없음"}); continue
+            if not (1 <= len(kw) <= 40):
+                errors.append({"row": i + 1, "reason": "키워드는 1~40자"}); continue
+            if not url or not _NAVER_URL.match(url) or not m2:
+                errors.append({"row": i + 1, "reason": "네이버 상품 링크(…/products/상품ID) 또는 가격비교 링크가 아님"}); continue
+            url = url.split("?", 1)[0]
+            qty = max(1, min(100, int(r.qty or 1)))
+            days = max(1, min(365, int(r.days or 30)))
+            pid, cat = (m2.group(1) or ""), (m2.group(2) or "")
+            start = base.isoformat()
+            end = (base + _dt.timedelta(days=days)).isoformat()
+            first_no = None
+            for _ in range(qty):
+                _STATE["seq"] += 1
+                slot = {"owner": owner, "kw": kw, "url": url, "days": days, "qty": 1, "pid": pid, "nvMid": cat or "",
+                        "name": f"스마트스토어 상품 {pid} (조회 대기)" if pid else f"가격비교 상품 {cat} (조회 대기)", "mall": "조회 대기",
+                        "catalog": bool(cat), "price": None, "review": None, "status": "wait", "rank": None, "note": "", "jobId": None,
+                        "start": start, "end": end, "no": _STATE["seq"], "user": True, "tries": 0, "lastTry": now, "live": False,
+                        "history": [], "created": _kst_now(), "bulk": True}
+                _STATE["slots"].insert(0, slot)
+                created.append(slot)
+                first_no = first_no or slot["no"]
+                groups.setdefault(kw, []).append((slot, {"key": str(slot["no"]), "pid": pid, "nvMid": "", "catalogId": cat}))
+            _STATE["logs"].insert(0, {"no": len(_STATE["logs"]) + 1, "kind": "new", "agency": "sm6974", "owner": owner, "qty": qty, "days": days,
+                                      "created": _kst_now(), "start": start,
+                                      "desc": f"일괄 등록 · {kw} · " + (f"스마트스토어 상품 {pid}" if pid else f"가격비교 상품 {cat}") + (f" × {qty}" if qty > 1 else ""),
+                                      "slot": first_no, "user": True})
+        if len(_STATE["logs"]) > _MAX_LOGS:
+            del _STATE["logs"][_MAX_LOGS:]
+        was_idle = not _DAILY_QUEUE
+        for kw, pairs in groups.items():
+            jid = secrets.token_hex(8)
+            _JOBS[jid] = {
+                "id": jid, "status": "queued", "step": "일괄 조회 대기", "created": now, "kind": "daily", "bulk": True,
+                "url": str(pairs[0][0].get("url") or ""), "keyword": kw, "pages": pages, "pid": "", "catalogId": "",
+                "targets": [t for _, t in pairs], "result": None, "error": None,
+            }
+            with _JOB_LOCK:
+                _DAILY_QUEUE.append(jid)
+            for s_, _ in pairs:
+                s_.update({"jobId": jid, "live": True, "lastTry": now, "note": "일괄 등록 조회 중"})
+        if groups:
+            prev = dict(_STATE.get("daily") or {})
+            if was_idle:
+                _STATE["daily"] = {"lastRunDate": prev.get("lastRunDate"), "startedAt": _kst_now(), "queued": len(groups), "done": 0, "failed": 0, "forced": True, "bulk": True}
+            else:
+                prev["queued"] = int(prev.get("queued") or 0) + len(groups)
+                _STATE["daily"] = prev
+        if created:
+            _STATE["version"] += 1
+            ok = _save_state()
+        else:
+            ok = True
+    print(f"[ranklab] bulk: {len(created)} slot(s), {len(groups)} keyword group(s), {len(errors)} error(s), pages={pages}")
+    return {"ok": True, "created": len(created), "groups": len(groups), "errors": errors, "persisted": ok, "version": _STATE["version"]}
