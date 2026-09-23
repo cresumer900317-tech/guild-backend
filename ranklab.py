@@ -582,6 +582,8 @@ def _apply_result_to_slots(job: dict) -> None:
                               "price": x.get("price") if x.get("price") is not None else s.get("price"), "review": x.get("review") if x.get("review") is not None else s.get("review")})
                     if x.get("title") and (not s.get("name") or "(수집 대기)" in str(s.get("name")) or "(조회 대기)" in str(s.get("name")) or str(s.get("name")).startswith("조회 중")):
                         s["name"] = x["title"]
+                    if x.get("mall") and str(s.get("mall") or "") in ("", "-", "조회 대기", "다음 수집 시 자동 조회"):
+                        s["mall"] = x["mall"]
                 elif x:
                     s.update({"status": "err", "rank": None,
                               "note": f"\"{s.get('kw')}\" 검색 결과 {int(r.get('rangeMax') or 1000):,}위({r.get('searchedPages')}페이지) 안에 없음"})
