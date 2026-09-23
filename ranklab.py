@@ -544,7 +544,7 @@ def add_slots(body: SlotIn, request: Request):
             _STATE["seq"] += 1
             slot = body.model_dump()
             slot.update({"no": _STATE["seq"], "kw": kw, "qty": 1, "days": days, "user": True, "tries": 0, "lastTry": time.time(),
-                         "live": bool(body.jobId), "history": ([{"d": body.start[:10] if body.start else "", "r": body.rank}] if body.rank is not None else []),
+                         "live": bool(body.jobId), "history": ([{"d": _kst_date(), "r": body.rank}] if body.rank is not None else []),   # 재사용 결과의 기록일은 시작일(내일)이 아니라 오늘
                          "created": _kst_now()})
             _STATE["slots"].insert(0, slot)
             created.append(slot)
@@ -658,3 +658,50 @@ def delete_slots(body: DeleteIn, request: Request):
         _STATE["version"] += 1
         _save_state()
         return {"ok": True, "deleted": removed, "hidden": len(_STATE["hidden"]), "version": _STATE["version"]}
+
+
+class RecheckIn(BaseModel):
+    nos: list[int] = Field(max_length=100)
+    pages: int = 13
+
+
+@router.post("/slots/recheck")
+def recheck_slots(body: RecheckIn, request: Request):
+    """선택한 등록 슬롯을 지금 다시 조회한다. 확정 결과(범위 밖 '오류')도 대상. 같은 url+키워드는 한 작업으로 묶는다."""
+    _gc()
+    if not _rate_ok(_ip(request)):
+        raise HTTPException(status_code=429, detail="잠시 후 다시 시도해 주세요")
+    nos = set(int(n) for n in body.nos[:100])
+    pages = max(1, min(13, int(body.pages or 13)))
+    now = time.time()
+    queued = 0
+    groups: dict = {}
+    with _STATE_LOCK:
+        _require_loaded()
+        for s in _STATE["slots"]:
+            url, kw = str(s.get("url") or ""), str(s.get("kw") or "")
+            if int(s.get("no") or 0) not in nos or not s.get("user") or (s.get("live") and s.get("jobId")):
+                continue
+            if not url or not _NAVER_URL.match(url) or not _PID.search(url) or not kw:
+                continue
+            groups.setdefault((url, kw), []).append(s)
+        if not groups:
+            return {"ok": True, "queued": 0, "jobs": 0}
+        if len(_QUEUE) + len(groups) > _MAX_PENDING:
+            raise HTTPException(status_code=503, detail="대기 중인 조회가 많습니다. 잠시 후 다시 시도해 주세요")
+        for (url, kw), group in groups.items():
+            m = _PID.search(url)
+            jid = secrets.token_hex(8)
+            _JOBS[jid] = {
+                "id": jid, "status": "queued", "step": "재조회 대기", "created": now,
+                "url": url, "keyword": kw, "pages": pages,
+                "pid": (m.group(1) or "") if m else "", "catalogId": (m.group(2) or "") if m else "", "result": None, "error": None, "retry": True,
+            }
+            with _JOB_LOCK:
+                _QUEUE.append(jid)
+            for s in group:
+                s.update({"jobId": jid, "live": True, "lastTry": now, "note": "재조회 진행 중"})
+                queued += 1
+        _STATE["version"] += 1
+        _save_state()
+    return {"ok": True, "queued": queued, "jobs": len(groups)}
