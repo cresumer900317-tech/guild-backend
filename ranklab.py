@@ -11,7 +11,7 @@
   GET  /api/ranklab/daily                                       → 일일 갱신 상태
   POST /api/ranklab/daily/run?key=&force=  (워커 토큰)          → 일일 갱신 수동 시작
 
-일일 갱신: 매일 11:00(KST) 이후 워커가 처음 큐를 비운 시점에 등록 슬롯 전체를 (url, 키워드) 단위로 묶어 다시 조회한다.
+정기 갱신: 매일 11:00·17:00(KST) 이후 워커가 처음 큐를 비운 시점에 등록 슬롯 전체를 (url, 키워드) 단위로 묶어 다시 조회한다.
 스케줄러 스레드 없이 워커의 claim 폴링(3초)에서 판단하므로 워커 PC가 꺼져 있던 날은 켜지는 즉시 그날 분을 한 번 돌린다.
 '오늘 이미 돌았는지'는 Storage 의 state.json(daily.lastRunDate)에 남겨 재배포 후에도 중복 실행하지 않는다.
 
@@ -185,7 +185,9 @@ def worker_claim(x_worker_key: Optional[str] = Header(default=None)):
 
 
 # ── 일일 갱신(매일 11:00 KST) ─────────────────────────────────────
-_DAILY_HOUR = 11
+# 정기 갱신 시각(KST): 하루 두 번 11시·17시(대표 요청 2026-09-24). RANKLAB_DAILY_HOURS 로 바꿀 수 있음
+_DAILY_HOURS = sorted({int(h) for h in (os.getenv("RANKLAB_DAILY_HOURS") or "11,17").split(",") if h.strip()})
+_DAILY_HOUR = _DAILY_HOURS[0]
 _DAILY_QUEUE: deque[str] = deque()
 _DAILY_MAX_GROUPS = 500
 
@@ -198,9 +200,21 @@ def _kst_hour() -> int:
     return int(time.strftime("%H", time.localtime(time.time() + 9 * 3600)))
 
 
+def _run_key() -> Optional[str]:
+    """지금 기준 가장 최근에 지난 정기 회차 'YYYY-MM-DD HH'(오늘 첫 회차 전이면 None)."""
+    past = [h for h in _DAILY_HOURS if h <= _kst_hour()]
+    return f"{_kst_date()} {past[-1]:02d}" if past else None
+
+
 def _daily_due() -> bool:
     d = _STATE.get("daily") or {}
-    return _kst_hour() >= _DAILY_HOUR and d.get("lastRunDate") != _kst_date()
+    key = _run_key()
+    if not key:
+        return False
+    last = d.get("lastRunKey")
+    if not last and d.get("lastRunDate") == _kst_date():
+        last = key   # 두 번 갱신으로 바꾸기 전에 오늘 이미 돈 기록 → 이번 회차는 한 것으로 본다(배포 직후 중복 방지)
+    return last != key
 
 
 def _enqueue_daily(force: bool = False) -> int:
@@ -239,7 +253,8 @@ def _enqueue_daily(force: bool = False) -> int:
             for s, _ in pairs:
                 s.update({"jobId": jid, "live": True, "lastTry": now, "note": "일일 갱신 중"})
         # 수동(force) 실행이 정기 실행 전(11시 이전)이면 오늘의 정기 실행은 그대로 남겨 둔다
-        _STATE["daily"] = {"lastRunDate": _kst_date() if due else prev.get("lastRunDate"), "startedAt": _kst_now(),
+        _STATE["daily"] = {"lastRunDate": _kst_date() if due else prev.get("lastRunDate"),
+                           "lastRunKey": _run_key() if due else prev.get("lastRunKey"), "startedAt": _kst_now(),
                            "queued": len(items), "done": 0, "failed": 0, "forced": bool(force) and not due}
         _STATE["version"] += 1
         _save_state()
@@ -253,7 +268,8 @@ def daily_status():
     with _STATE_LOCK:
         _load_state()
         d = dict(_STATE.get("daily") or {})
-    return {"daily": d, "due_now": _daily_due(), "pending_daily": len(_DAILY_QUEUE), "hour_kst": _kst_hour(), "run_at": f"{_DAILY_HOUR:02d}:00 KST"}
+    return {"daily": d, "due_now": _daily_due(), "pending_daily": len(_DAILY_QUEUE), "hour_kst": _kst_hour(),
+            "run_at": " · ".join(f"{h:02d}:00" for h in _DAILY_HOURS) + " KST", "hours": _DAILY_HOURS}
 
 
 @router.post("/daily/run")
@@ -824,7 +840,7 @@ def add_slots_bulk(body: BulkIn, request: Request):
         if groups:
             prev = dict(_STATE.get("daily") or {})
             if was_idle:
-                _STATE["daily"] = {"lastRunDate": prev.get("lastRunDate"), "startedAt": _kst_now(), "queued": len(groups), "done": 0, "failed": 0, "forced": True, "bulk": True}
+                _STATE["daily"] = {"lastRunDate": prev.get("lastRunDate"), "lastRunKey": prev.get("lastRunKey"), "startedAt": _kst_now(), "queued": len(groups), "done": 0, "failed": 0, "forced": True, "bulk": True}
             else:
                 prev["queued"] = int(prev.get("queued") or 0) + len(groups)
                 _STATE["daily"] = prev
