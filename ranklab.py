@@ -624,15 +624,15 @@ def _apply_result_to_slots(job: dict) -> None:
                 day = (r.get("collectedAt") or "")[:10] or _kst_date()
                 hist = [h for h in (s.get("history") or []) if isinstance(h, dict) and h.get("r") is not None and h.get("d") != day]
                 if x and x.get("found"):
-                    hist.append({"d": day, "r": x.get("rank")})
-                    s.update({"status": "ok", "rank": x.get("rank"), "note": "", "nvMid": x.get("nvMid") or s.get("nvMid") or "-",
+                    hist.append({"d": day, "r": x.get("rank"), "s": x.get("screenRank")})
+                    s.update({"status": "ok", "rank": x.get("rank"), "screenRank": x.get("screenRank"), "note": "", "nvMid": x.get("nvMid") or s.get("nvMid") or "-",
                               "price": x.get("price") if x.get("price") is not None else s.get("price"), "review": x.get("review") if x.get("review") is not None else s.get("review")})
                     if x.get("title") and (not s.get("name") or "(수집 대기)" in str(s.get("name")) or "(조회 대기)" in str(s.get("name")) or str(s.get("name")).startswith("조회 중")):
                         s["name"] = x["title"]
                     if x.get("mall") and str(s.get("mall") or "") in ("", "-", "조회 대기", "다음 수집 시 자동 조회"):
                         s["mall"] = x["mall"]
                 elif x:
-                    s.update({"status": "err", "rank": None,
+                    s.update({"status": "err", "rank": None, "screenRank": None,
                               "note": f"\"{s.get('kw')}\" 검색 결과 {int(r.get('rangeMax') or 1000):,}위({r.get('searchedPages')}페이지) 안에 없음"})
                 else:
                     s["note"] = ""   # 대상에서 빠진 슬롯(식별자 없음)
@@ -643,10 +643,11 @@ def _apply_result_to_slots(job: dict) -> None:
                 day = (r.get("collectedAt") or "")[:10] or _kst_date()
                 hist = [h for h in (s.get("history") or []) if isinstance(h, dict) and h.get("r") is not None and h.get("d") != day]
                 if found:
-                    hist.append({"d": day, "r": r.get("rank")})
+                    hist.append({"d": day, "r": r.get("rank"), "s": r.get("screenRank")})
                 s.update({"name": r.get("name") or s.get("name"), "pid": r.get("pid") or s.get("pid") or "", "nvMid": r.get("nvMid") or s.get("nvMid") or "-",
                           "mall": r.get("mall") or "-", "catalog": bool(r.get("catalog")), "price": r.get("price"), "review": r.get("review"),
                           "url": r.get("url") or s.get("url"), "status": "ok" if found else "err", "rank": r.get("rank") if found else None,
+                          "screenRank": r.get("screenRank") if found else None,
                           "history": hist[-90:],
                           "note": "" if found else f"\"{s.get('kw')}\" 검색 결과 {int(r.get('rangeMax') or 1000):,}위({r.get('searchedPages')}페이지) 안에 없음",
                           "live": False, "lastChecked": _kst_now()})
