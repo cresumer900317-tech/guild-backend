@@ -217,7 +217,7 @@ def _daily_due() -> bool:
     return last != key
 
 
-def _enqueue_daily(force: bool = False) -> int:
+def _enqueue_daily(force: bool = False, mark_hour: Optional[int] = None) -> int:
     """등록 슬롯 전체를 (url, 키워드) 묶음으로 일일 갱신 큐에 넣는다. 오늘 이미 돌았으면 0. 반환=묶음 수."""
     now = time.time()
     with _STATE_LOCK:
@@ -254,7 +254,8 @@ def _enqueue_daily(force: bool = False) -> int:
                 s.update({"jobId": jid, "live": True, "lastTry": now, "note": "일일 갱신 중"})
         # 수동(force) 실행이 정기 실행 전(11시 이전)이면 오늘의 정기 실행은 그대로 남겨 둔다
         _STATE["daily"] = {"lastRunDate": _kst_date() if due else prev.get("lastRunDate"),
-                           "lastRunKey": _run_key() if due else prev.get("lastRunKey"), "startedAt": _kst_now(),
+                           "lastRunKey": (f"{_kst_date()} {mark_hour:02d}" if mark_hour is not None else (_run_key() if due else prev.get("lastRunKey"))),
+                           "startedAt": _kst_now(),
                            "queued": len(items), "done": 0, "failed": 0, "forced": bool(force) and not due}
         _STATE["version"] += 1
         _save_state()
@@ -273,10 +274,12 @@ def daily_status():
 
 
 @router.post("/daily/run")
-def daily_run(key: Optional[str] = None, force: int = 0, x_worker_key: Optional[str] = Header(default=None)):
-    """수동 시작(워커 토큰). force=1 이면 오늘 이미 돌았어도 다시 돈다."""
+def daily_run(key: Optional[str] = None, force: int = 0, mark: Optional[int] = None, x_worker_key: Optional[str] = Header(default=None)):
+    """수동 시작(워커 토큰). force=1 이면 오늘 이미 돌았어도 다시 돈다. mark=23 이면 이번 실행을 오늘 23시 회차로 친다(당겨 실행)."""
     _check_worker(x_worker_key or key)
-    n = _enqueue_daily(force=bool(force))
+    if mark is not None and mark not in _DAILY_HOURS:
+        raise HTTPException(status_code=400, detail="mark 는 정기 시각 중 하나")
+    n = _enqueue_daily(force=bool(force), mark_hour=mark)
     return {"ok": True, "queued_groups": n, "daily": _STATE.get("daily")}
 
 
