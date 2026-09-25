@@ -185,8 +185,8 @@ def worker_claim(x_worker_key: Optional[str] = Header(default=None)):
 
 
 # ── 일일 갱신(매일 11:00 KST) ─────────────────────────────────────
-# 정기 갱신 시각(KST): 하루 세 번 11시·17시·23시(대표 요청 2026-09-24). RANKLAB_DAILY_HOURS 로 바꿀 수 있음
-_DAILY_HOURS = sorted({int(h) for h in (os.getenv("RANKLAB_DAILY_HOURS") or "11,17,23").split(",") if h.strip()})
+# 정기 갱신 시각(KST): 하루 네 번 5시·11시·17시·23시(6시간 간격, 2026-09-26). RANKLAB_DAILY_HOURS 로 바꿀 수 있음
+_DAILY_HOURS = sorted({int(h) for h in (os.getenv("RANKLAB_DAILY_HOURS") or "5,11,17,23").split(",") if h.strip()})
 _DAILY_HOUR = _DAILY_HOURS[0]
 _DAILY_QUEUE: deque[str] = deque()
 _DAILY_MAX_GROUPS = 500
